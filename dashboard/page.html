@@ -1,0 +1,1012 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>thinknow · Link 2.0 Dashboard</title>
+
+<!-- ── CDN: Tailwind (utilities) + Chart.js (charts) ───────────────────────── -->
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.1/chart.umd.min.js"></script>
+
+<!--
+  ════════════════════════════════════════════════════════════════════════════
+  API CONTRACT  —  GET {API_BASE}/api/dashboard-metrics
+  Query params (all optional): api, suppliers (csv), date_from, date_to, type, status
+  Expected JSON response:
+  {
+    "last_update": "2026-09-08T19:55:00Z",
+    "totals":  { "surveys":695,"transactions":21129,"completed":9051,
+                 "conv_rate":42.84,"cost":12759.03,"revenue":18401.73,
+                 "profit":5642.70,"margin_pct":30.7 },
+    "summary_rows": [ { "year":2026,"month":9,"surveys":655,"transactions":21129,
+                        "completed":9051,"conv_rate":42.84,"cost":12759.03,
+                        "revenue":18401.73 } ],
+    "kpis": {
+      "financial":   { "revenue":18401.73,"revenue_delta_pct":6.4,
+                       "cost":12759.03,"cost_delta_pct":3.1,
+                       "profit":5642.70,"margin_pct":30.7,
+                       "conv_rate":42.84,"conv_rate_delta_pct":-1.2 },
+      "management":  { "eligible":146,"blocked_profit_floor":38,"blocked_exclusion":7,
+                       "awaiting_cpi_input":21,"auto_safe_candidates":12,
+                       "decisions_today":214 },
+      "statistical": { "ir_current":41.2,"ir_slope_per_day":0.42,
+                       "ir_projected_change":2.9,"ir_direction":"up",
+                       "alarms_low_ir":3,"alarms_high_term":2,
+                       "termination_rate_pct":55.7 }
+    },
+    "by_supplier":  [ { "name":"Prime","transactions":14150,"pct":66.99 }, ... ],
+    "by_status":    [ { "name":"Completed","transactions":9051,"pct":42.8 }, ... ],
+    "status_by_day":[ { "day":"Sep 01","completed":1180,"overquota":90,"terminate":1520 }, ... ],
+    "ir_trend":     [ { "day":"Sep 01","ir":39.8 }, ... ],           // measured
+    "ir_trend_fit": [ { "day":"Sep 01","ir":39.6 }, ... ],           // regression line (same days)
+    "revenue_by_day":[ { "day":"Sep 01","revenue":2450.10,"cost":1690.40 }, ... ],
+    "external_surveys":[ { "name":"...","supplier":"Prime","status":"Completed",
+                          "completed":320,"conv_rate":44.1 }, ... ]
+  }
+
+  If the API is unreachable / slow (> FETCH_TIMEOUT_MS) the page renders the
+  MOCK dataset below and shows a "demo data" badge. Nothing breaks.
+  ════════════════════════════════════════════════════════════════════════════
+-->
+
+<style>
+  :root{
+    /* thinknow brand */
+    --brand:#db2777; --brand-strong:#9d174d; --brand-soft:#fce7f3; --brand-line:#f9a8d4;
+    /* surfaces / ink  (dataviz reference chrome) */
+    --page:#f9f9f7; --surface:#ffffff; --surface-2:#fcfcfb;
+    --ink:#0b0b0b; --ink-2:#52514e; --muted:#898781;
+    --grid:#e1e0d9; --axis:#c3c2b7; --border:rgba(11,11,11,.10);
+    /* categorical series (dataviz validated slots 1-3) */
+    --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a;
+    /* status (dataviz fixed status palette) */
+    --good:#0ca30c; --warn:#fab219; --crit:#d03b3b; --serious:#ec835a;
+    --trend:#006300;
+  }
+  body{background:var(--page);color:var(--ink);
+       font-family:system-ui,-apple-system,"Segoe UI",sans-serif;}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:12px;}
+  .tnum{font-variant-numeric:tabular-nums;}
+  .kpi-val{font-variant-numeric:tabular-nums;letter-spacing:-.01em;}
+  .slicer-btn{border:1px solid var(--border);background:var(--surface);border-radius:8px;}
+  .slicer-btn[aria-pressed="true"]{
+     border-color:var(--brand);color:var(--brand-strong);background:var(--brand-soft);font-weight:600;}
+  .grp-label{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);}
+  .delta-up{color:var(--good);} .delta-down{color:var(--crit);}
+  table.compact th,table.compact td{padding:.35rem .5rem;}
+  ::-webkit-scrollbar{height:8px;width:8px}
+  ::-webkit-scrollbar-thumb{background:#d8d7d0;border-radius:8px}
+  #loading{transition:opacity .2s ease;}
+  @keyframes pulse{0%{opacity:1}50%{opacity:.25}100%{opacity:1}}
+  #live-dot{animation:pulse 1.6s ease-in-out infinite;}
+  #agent-pop{position:fixed;right:16px;bottom:16px;width:340px;z-index:40;
+    transform:translateY(140%);transition:transform .35s cubic-bezier(.2,.8,.2,1);}
+  #agent-pop.show{transform:translateY(0);}
+  .flash{animation:flash 1s ease;}
+  @keyframes flash{0%{background:var(--brand-soft)}100%{background:transparent}}
+  @keyframes pulse-red{0%{opacity:1}50%{opacity:.55}100%{opacity:1}}
+  #conn-banner{animation:pulse-red 1.8s ease-in-out infinite;}
+</style>
+</head>
+
+<body class="p-4 text-[13px]">
+
+<!-- ── HEADER ─────────────────────────────────────────────────────────────── -->
+<header class="card px-6 py-3 mb-4 flex items-center justify-between">
+  <div class="flex flex-col gap-0.5">
+    <div class="flex items-baseline gap-3">
+      <span class="text-2xl font-black tracking-wide" style="color:var(--brand)">thinknow</span>
+      <span class="text-[11px] font-semibold px-2 py-0.5 rounded-full"
+            style="background:var(--brand-soft);color:var(--brand-strong)">Link 2.0</span>
+    </div>
+    <p class="text-[10px]" style="color:var(--muted)">
+      Live data — not yet reconciled. Power BI applies Link's manual reconciliation
+      (client file) afterward and may show different totals, especially for recent days.
+    </p>
+  </div>
+  <h1 class="text-base font-bold text-center">Analytics Dashboard</h1>
+  <div class="text-right leading-tight">
+    <p class="flex items-center justify-end gap-1.5 text-[10px] uppercase tracking-wider" style="color:var(--muted)">
+      <span id="live-dot" class="w-1.5 h-1.5 rounded-full" style="background:var(--good)"></span>
+      <span id="live-label">Live</span>
+    </p>
+    <p id="last-update" class="text-xs tnum" style="color:var(--ink-2)">—</p>
+    <p id="updated-ago" class="text-[10px] tnum" style="color:var(--muted)"></p>
+    <span id="mock-badge"
+          class="mt-0.5 text-[10px] font-semibold px-1.5 py-0.5 rounded"
+          style="display:none;background:#fff4d6;color:#8a5a00">demo data — API not reached</span>
+  </div>
+</header>
+
+<div id="conn-banner" hidden
+     class="w-full mb-4 rounded-lg px-4 py-2 text-center text-xs font-semibold"
+     style="background:#fdecea;color:#b3261e;border:1px solid #f5c2c0">
+  ⚠ Alert: is not connected now! Connection missing…
+</div>
+
+<div class="grid grid-cols-12 gap-4">
+
+  <!-- ── SIDEBAR / SLICERS ───────────────────────────────────────────────── -->
+  <aside class="col-span-12 lg:col-span-3 card p-4 flex flex-col gap-4 h-max lg:sticky lg:top-4 lg:self-start">
+    <div>
+      <p class="grp-label mb-2">API</p>
+      <div class="grid grid-cols-2 gap-2">
+        <button class="slicer-btn py-2 text-xs" data-api="open_lab"  aria-pressed="true">Open Lab API</button>
+        <button class="slicer-btn py-2 text-xs" data-api="symmetric" aria-pressed="false">Symmetric API</button>
+      </div>
+    </div>
+
+    <div class="border-t pt-3" style="border-color:var(--border)">
+      <p class="grp-label mb-2">Suppliers</p>
+      <div class="flex flex-col gap-2">
+        <button class="slicer-btn py-2 text-xs" data-supplier="Digaygane" aria-pressed="true">Digaygane</button>
+        <button class="slicer-btn py-2 text-xs" data-supplier="Lucid"     aria-pressed="true">Lucid</button>
+        <button class="slicer-btn py-2 text-xs" data-supplier="Prime"     aria-pressed="true">Prime</button>
+      </div>
+    </div>
+
+    <div class="border-t pt-3" style="border-color:var(--border)">
+      <p class="grp-label mb-2">Year</p>
+      <div class="flex flex-col gap-1" id="year-picker">
+        <label class="flex items-center gap-2 text-xs cursor-pointer">
+          <input type="checkbox" data-year="2024"> 2024
+        </label>
+        <label class="flex items-center gap-2 text-xs cursor-pointer">
+          <input type="checkbox" data-year="2025"> 2025
+        </label>
+        <label class="flex items-center gap-2 text-xs cursor-pointer">
+          <input type="checkbox" data-year="2026"> 2026
+        </label>
+      </div>
+    </div>
+
+    <div class="border-t pt-3" style="border-color:var(--border)">
+      <p class="grp-label mb-2">Month</p>
+      <div class="grid grid-cols-2 gap-1" id="month-picker">
+        <label class="flex items-center gap-1.5 text-xs cursor-pointer"><input type="checkbox" data-month="1">Jan</label>
+        <label class="flex items-center gap-1.5 text-xs cursor-pointer"><input type="checkbox" data-month="2">Feb</label>
+        <label class="flex items-center gap-1.5 text-xs cursor-pointer"><input type="checkbox" data-month="3">Mar</label>
+        <label class="flex items-center gap-1.5 text-xs cursor-pointer"><input type="checkbox" data-month="4">Apr</label>
+        <label class="flex items-center gap-1.5 text-xs cursor-pointer"><input type="checkbox" data-month="5">May</label>
+        <label class="flex items-center gap-1.5 text-xs cursor-pointer"><input type="checkbox" data-month="6">Jun</label>
+        <label class="flex items-center gap-1.5 text-xs cursor-pointer"><input type="checkbox" data-month="7">Jul</label>
+        <label class="flex items-center gap-1.5 text-xs cursor-pointer"><input type="checkbox" data-month="8">Aug</label>
+        <label class="flex items-center gap-1.5 text-xs cursor-pointer"><input type="checkbox" data-month="9">Sep</label>
+        <label class="flex items-center gap-1.5 text-xs cursor-pointer"><input type="checkbox" data-month="10">Oct</label>
+        <label class="flex items-center gap-1.5 text-xs cursor-pointer"><input type="checkbox" data-month="11">Nov</label>
+        <label class="flex items-center gap-1.5 text-xs cursor-pointer"><input type="checkbox" data-month="12">Dec</label>
+      </div>
+    </div>
+
+    <div class="border-t pt-3" style="border-color:var(--border)">
+      <p class="grp-label mb-2">Day</p>
+      <div class="flex items-center gap-2">
+        <input id="day-from" type="number" min="1" max="31" value="1"
+               class="w-full border rounded p-1.5 text-xs" style="border-color:var(--border)">
+        <span style="color:var(--muted)">–</span>
+        <input id="day-to" type="number" min="1" max="31" value="31"
+               class="w-full border rounded p-1.5 text-xs" style="border-color:var(--border)">
+      </div>
+      <p class="text-[10px] mt-1.5" id="range-note" style="color:var(--muted)"></p>
+    </div>
+
+    <div class="border-t pt-3" style="border-color:var(--border)">
+      <p class="grp-label mb-2">Type Survey</p>
+      <select id="type-survey" class="w-full border rounded p-1.5 text-xs bg-white" style="border-color:var(--border)">
+        <option value="all">All</option><option>Consumer</option><option>B2B</option>
+        <option>Healthcare</option><option>Political</option>
+      </select>
+    </div>
+
+    <div class="border-t pt-3" style="border-color:var(--border)">
+      <p class="grp-label mb-2">Status_Report</p>
+      <select id="status-report" class="w-full border rounded p-1.5 text-xs bg-white" style="border-color:var(--border)">
+        <option value="all">All</option><option>Live</option><option>Awarded</option>
+        <option>Paused</option><option>Closed</option>
+      </select>
+    </div>
+
+    <button id="clear-slicers"
+            class="mt-1 w-full rounded-full py-2 text-xs font-semibold border transition"
+            style="border-color:var(--brand-line);color:var(--brand-strong);background:var(--brand-soft)">
+      Clear all slicers
+    </button>
+  </aside>
+
+  <!-- ── MAIN ────────────────────────────────────────────────────────────── -->
+  <main class="col-span-12 lg:col-span-9 flex flex-col gap-4 relative">
+
+    <!-- loading overlay -->
+    <div id="loading" class="absolute inset-0 z-20 grid place-items-center rounded-xl"
+         style="background:rgba(249,249,247,.7);backdrop-filter:blur(1px)">
+      <div class="flex items-center gap-2 text-xs font-semibold" style="color:var(--ink-2)">
+        <span class="inline-block w-4 h-4 border-2 rounded-full animate-spin"
+              style="border-color:var(--brand);border-top-color:transparent"></span>
+        Loading metrics…
+      </div>
+    </div>
+
+    <!-- summary table -->
+    <section class="card p-3 overflow-x-auto">
+      <p class="grp-label mb-2">Summary by period</p>
+      <table class="w-full text-xs text-center compact tnum">
+        <thead>
+          <tr style="background:var(--brand);color:#fff">
+            <th>Year</th><th>Month</th><th>Surveys</th><th>Transactions</th>
+            <th>Completed</th><th>Conv_Rate</th><th>Cost (CPI+Fee)</th><th>Revenue</th>
+          </tr>
+        </thead>
+        <tbody id="summary-body"></tbody>
+      </table>
+    </section>
+
+    <!-- ══ KPI BAND — three labelled groups ═══════════════════════════════ -->
+    <section class="grid grid-cols-1 xl:grid-cols-3 gap-4">
+
+      <div class="card p-3">
+        <p class="grp-label mb-2" style="color:var(--brand-strong)">Financial</p>
+        <div class="grid grid-cols-2 gap-3" id="kpi-financial"></div>
+      </div>
+
+      <div class="card p-3">
+        <p class="grp-label mb-2" style="color:var(--brand-strong)">Operations <span class="normal-case font-normal" style="color:var(--muted)">· our engine</span></p>
+        <div class="grid grid-cols-2 gap-3" id="kpi-management"></div>
+      </div>
+
+      <div class="card p-3">
+        <p class="grp-label mb-2" style="color:var(--brand-strong)">Statistical</p>
+        <div class="grid grid-cols-2 gap-3" id="kpi-statistical"></div>
+      </div>
+    </section>
+
+    <!-- donuts -->
+    <section class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div class="card p-4">
+        <p class="grp-label mb-2">Transactions by Supplier</p>
+        <div class="flex items-center gap-3">
+          <div class="h-[180px] flex-1 min-w-0"><canvas id="chart-supplier"></canvas></div>
+          <ul id="legend-supplier" class="text-xs space-y-1.5 w-[140px] shrink-0"></ul>
+        </div>
+      </div>
+      <div class="card p-4">
+        <p class="grp-label mb-2">Transactions by Status</p>
+        <div class="flex items-center gap-3">
+          <div class="h-[180px] flex-1 min-w-0"><canvas id="chart-status"></canvas></div>
+          <ul id="legend-status" class="text-xs space-y-1.5 w-[140px] shrink-0"></ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- supplier ranking (feature del panel anterior) -->
+    <section class="card p-3 overflow-x-auto">
+      <p class="grp-label mb-2">Supplier ranking <span class="normal-case font-normal" style="color:var(--muted)">· by volume / conversion</span></p>
+      <table class="w-full text-xs compact tnum">
+        <thead><tr style="color:var(--muted)" class="text-left border-b">
+          <th>Supplier</th><th class="text-right">Transactions</th><th class="text-right">Completes</th>
+          <th class="text-right">Conv_Rate</th><th class="text-right">Avg CPI</th>
+        </tr></thead>
+        <tbody id="ranking-body"></tbody>
+      </table>
+    </section>
+
+    <!-- status by day (stacked bars, one axis) -->
+    <section class="card p-4">
+      <p class="grp-label mb-2">Survey Status by day <span class="normal-case font-normal" style="color:var(--muted)">· counts</span></p>
+      <div class="h-[240px]"><canvas id="chart-statusday"></canvas></div>
+    </section>
+
+    <!-- ══ STATISTICAL TREND — IR: overall + by buyer + regression ════════ -->
+    <section class="card p-4">
+      <div class="flex items-start justify-between mb-1 flex-wrap gap-2">
+        <p class="grp-label">IR trend & projection</p>
+        <div class="flex items-center gap-2">
+          <div class="flex gap-1" id="irtrend-mode">
+            <button class="slicer-btn px-2 py-1 text-[11px]" data-irmode="overall" aria-pressed="true">Overall</button>
+            <button class="slicer-btn px-2 py-1 text-[11px]" data-irmode="buyer">By buyer</button>
+          </div>
+          <p id="trend-caption" class="text-xs font-semibold text-right" style="color:var(--ink-2)">—</p>
+        </div>
+      </div>
+      <div class="h-[240px]"><canvas id="chart-irtrend"></canvas></div>
+      <ul id="irbuyer-list" class="mt-2 grid grid-cols-2 md:grid-cols-3 gap-x-4 gap-y-1 text-[11px]" hidden></ul>
+      <p class="text-[10px] mt-1" style="color:var(--muted)">Click a buyer to filter the survey list below.</p>
+    </section>
+
+    <!-- alarmas (vistas IR / Terminación del panel anterior) -->
+    <section class="card p-3 overflow-x-auto">
+      <div class="flex items-center gap-2 mb-2">
+        <p class="grp-label">Performance alarms</p>
+        <div class="flex gap-1" id="alarm-tabs">
+          <button class="slicer-btn px-2 py-1 text-[11px]" data-alarm="ir_low" aria-pressed="true">Low IR <span id="cnt-ir"></span></button>
+          <button class="slicer-btn px-2 py-1 text-[11px]" data-alarm="termination_high">High termination <span id="cnt-term"></span></button>
+        </div>
+      </div>
+      <div class="max-h-[300px] overflow-y-auto"><table class="w-full text-xs compact tnum">
+        <thead class="sticky top-0" style="background:var(--surface)"><tr style="color:var(--muted)" class="text-left border-b">
+          <th>Survey</th><th>Buyer</th><th class="text-right">Value</th>
+          <th class="text-right">Threshold</th><th class="text-right">Age</th>
+        </tr></thead>
+        <tbody id="alarm-body"></tbody>
+      </table></div>
+    </section>
+
+    <!-- revenue vs cost by day (one $ axis) -->
+    <section class="card p-4">
+      <p class="grp-label mb-2">Revenue vs Cost by day</p>
+      <div class="h-[220px]"><canvas id="chart-revenue"></canvas></div>
+    </section>
+
+    <!-- external survey names -->
+    <section class="card p-3 overflow-x-auto">
+      <div class="flex items-center gap-2 mb-2">
+        <p class="grp-label">External Survey Name</p>
+        <span id="survey-filter" hidden class="text-[10px] font-semibold px-1.5 py-0.5 rounded"
+              style="background:var(--brand-soft);color:var(--brand-strong)"></span>
+      </div>
+      <div class="max-h-[420px] overflow-y-auto"><table class="w-full text-xs compact tnum">
+        <thead class="sticky top-0" style="background:var(--surface)">
+          <tr style="color:var(--muted)" class="text-left border-b" >
+            <th>Survey</th><th>Buyer</th><th>Supplier</th>
+            <th class="text-right">IR</th><th class="text-right">Completed</th>
+            <th class="text-right">Conv_Rate</th><th class="text-right">Term_Rate</th>
+          </tr>
+        </thead>
+        <tbody id="external-body"></tbody>
+      </table></div>
+    </section>
+
+  </main>
+</div>
+
+<footer class="text-center text-[10px] mt-4" style="color:var(--muted)">
+  thinknow · Link 2.0 — embeddable analytics dashboard
+</footer>
+
+<!-- ══ AGENT INSIGHT POPUP (LangChain agent — Phase 2; deterministic v1 for now) ══
+     Cicla entre oportunidades de margen y alarmas activas (IR bajo / termino
+     alto) -- mismo popup, mismo boton Next para ambos tipos. -->
+<div id="agent-pop" class="card shadow-xl p-4" style="border-color:var(--brand-line)">
+  <div class="flex items-center justify-between mb-1">
+    <span class="text-[10px] font-bold uppercase tracking-wider">
+      <span id="pop-badge" style="color:var(--brand-strong)">⚡ Margin opportunity</span>
+      <span id="pop-count" class="font-normal normal-case" style="color:var(--muted)"></span>
+    </span>
+    <button id="pop-close" class="text-xs leading-none px-1" style="color:var(--muted)">✕</button>
+  </div>
+  <p id="pop-title" class="text-sm font-bold" style="color:var(--ink)"></p>
+  <p id="pop-evidence" class="text-[11px] mt-1" style="color:var(--ink-2)"></p>
+  <p id="pop-gain" class="text-sm font-bold mt-2" style="color:var(--good)"></p>
+  <p id="pop-assumption" class="text-[10px] mt-1 italic" style="color:var(--muted)"></p>
+  <div class="flex gap-2 mt-3">
+    <button id="pop-apply" class="text-xs font-semibold px-2.5 py-1.5 rounded"
+            style="background:var(--brand);color:#fff"></button>
+    <button id="pop-next" class="text-xs px-2.5 py-1.5 rounded border" style="border-color:var(--border);color:var(--ink-2)">Next</button>
+    <button id="pop-dismiss" class="text-xs px-2.5 py-1.5 rounded" style="color:var(--muted)">Dismiss</button>
+  </div>
+  <p id="pop-footer" class="text-[9px] mt-2" style="color:var(--muted)">
+    Advisory only — the button routes to human approval, the agent never changes price itself.
+  </p>
+</div>
+
+<script>
+/* ═══════════════════════ CONFIG ═══════════════════════ */
+const API_BASE        = "http://127.0.0.1:8000";     // used only when this file is opened directly (file://)
+const API_KEY         = "";                          // X-API-Key; injected server-side when served at /dashboard/
+// Served by the API itself (http/https) -> same origin, no CORS. Opened as a file -> use API_BASE.
+const BASE = (location.protocol === "http:" || location.protocol === "https:") ? location.origin : API_BASE;
+const ENDPOINT          = BASE + "/api/dashboard-metrics/";
+const INSIGHTS_ENDPOINT = BASE + "/api/agent-insights/";
+const FETCH_TIMEOUT_MS = 15000;       // dev SQLite is slow; prod Postgres is fast
+const AUTO_REFRESH_MS  = 20000;        // live polling; 0 = off
+const HEADERS = API_KEY ? {"Accept":"application/json","X-API-Key":API_KEY} : {"Accept":"application/json"};
+
+/* ═══════════════════════ TOKENS (read CSS vars once) ═══════════════════════ */
+const css = getComputedStyle(document.documentElement);
+const C = k => css.getPropertyValue(k).trim();
+const T = { s1:C('--s1'), s2:C('--s2'), s3:C('--s3'),
+            good:C('--good'), warn:C('--warn'), crit:C('--crit'),
+            trend:C('--trend'), brand:C('--brand'),
+            ink:C('--ink'), ink2:C('--ink-2'), muted:C('--muted'),
+            grid:C('--grid'), axis:C('--axis'), surface:'#ffffff' };
+const money = n => '$' + (n||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const int   = n => (n||0).toLocaleString('en-US');
+const pct   = n => (n==null?'—':(n).toFixed(1)+'%');
+
+/* ═══════════════════════ MOCK FALLBACK ═══════════════════════ */
+const DAYS = ["Sep 01","Sep 02","Sep 03","Sep 04","Sep 05","Sep 06","Sep 07"];
+const MOCK = {
+  last_update: new Date().toISOString(),
+  totals:{surveys:695,transactions:21129,completed:9051,conv_rate:42.84,
+          cost:12759.03,revenue:18401.73,profit:5642.70,margin_pct:30.7},
+  summary_rows:[{year:2026,month:9,surveys:655,transactions:21129,completed:9051,
+                 conv_rate:42.84,cost:12759.03,revenue:18401.73}],
+  kpis:{
+    financial:{revenue:18401.73,revenue_delta_pct:6.4,cost:12759.03,cost_delta_pct:3.1,
+               profit:5642.70,margin_pct:30.7,conv_rate:42.84,conv_rate_delta_pct:-1.2},
+    management:{eligible:146,blocked_profit_floor:38,blocked_exclusion:7,
+               awaiting_cpi_input:21,auto_safe_candidates:12,decisions_today:214},
+    statistical:{ir_current:41.2,ir_slope_per_day:0.42,ir_projected_change:2.9,
+               ir_direction:"up",alarms_low_ir:3,alarms_high_term:2,termination_rate_pct:55.7}
+  },
+  by_supplier:[{name:"Prime",transactions:14150,pct:66.99},
+               {name:"Lucid",transactions:6970,pct:32.99},
+               {name:"Digaygane",transactions:9,pct:0.02}],
+  by_status:[{name:"Completed",transactions:9051,pct:42.8},
+             {name:"Terminated",transactions:11760,pct:55.7},
+             {name:"Overquota",transactions:318,pct:1.5}],
+  status_by_day:DAYS.map((d,i)=>({day:d,
+     completed:[1180,1520,1290,1010,1360,1180,1010][i],
+     overquota:[30,60,40,35,55,50,48][i],
+     terminate:[1490,2010,1720,1360,1880,1690,1610][i]})),
+  ir_trend:DAYS.map((d,i)=>({day:d,ir:[39.8,40.5,40.1,41.0,41.6,41.9,42.3][i]})),
+  ir_trend_fit:DAYS.map((d,i)=>({day:d,ir:+(39.6+0.42*i).toFixed(1)})),
+  revenue_by_day:DAYS.map((d,i)=>({day:d,
+     revenue:[2450,3120,2680,2110,2890,2530,2620][i],
+     cost:[1690,2160,1850,1460,1990,1750,1859][i]})),
+  external_surveys:[
+    {name:"30607 — Nationwide Native American study",buyer:"Symmetric API",supplier:"Prime",status:"Live",ir:44,completed:320,quota:400,conv_rate:44.1,terminate_rate:18.0},
+    {name:"PG AH SP 193888218",buyer:"Open Lab API",supplier:"Lucid",status:"Live",ir:38,completed:210,quota:300,conv_rate:38.7,terminate_rate:22.4},
+    {name:"SG AH EN 44509568",buyer:"Open Lab API",supplier:"Lucid",status:"Live",ir:41,completed:189,quota:260,conv_rate:41.2,terminate_rate:19.9},
+    {name:"116552 W5 65625065",buyer:"Symmetric API",supplier:"Prime",status:"Live",ir:47,completed:540,quota:540,conv_rate:46.9,terminate_rate:12.1}
+  ],
+  supplier_ranking:[
+    {supplier:"Prime",transactions:14150,completes:9051,conv_rate:64.0,avg_cpi:1.45},
+    {supplier:"Lucid",transactions:6970,completes:2510,conv_rate:36.0,avg_cpi:1.89},
+    {supplier:"Digaygane",transactions:9,completes:3,conv_rate:33.3,avg_cpi:null}
+  ],
+  ir_trend_by_buyer:[
+    {buyer:"Open Lab API",points:DAYS.map((d,i)=>({day:d,ir:[39,40,40,41,42,42,43][i]})),ir_current:43,slope_per_day:0.6,direction:"up",projected_change:3.6},
+    {buyer:"Symmetric API",points:DAYS.map((d,i)=>({day:d,ir:[45,44,45,44,45,44,45][i]})),ir_current:45,slope_per_day:0.05,direction:"flat",projected_change:0.3}
+  ],
+  alarms:[
+    {survey_name:"OL AH EN 2039930",buyer:"Open Lab API",type:"termination_high",value:100.0,threshold:50.0,triggered_at:"2026-09-09T02:00:00Z",age_hours:9.9},
+    {survey_name:"OL AH EN 2038219",buyer:"Open Lab API",type:"ir_low",value:0.0,threshold:11.0,triggered_at:"2026-09-09T04:00:00Z",age_hours:7.4}
+  ]
+};
+
+/* ═══════════════════════ STATE ═══════════════════════ */
+const today = new Date();
+const state = {
+  api:"open_lab",
+  suppliers:new Set(["Digaygane","Lucid","Prime"]),
+  year:today.getFullYear(), months:new Set([today.getMonth()+1]),
+  dayFrom:1, dayTo:today.getDate(),
+  type:"all", status:"all",
+  buyerFilter:null,          // drill-down: filtra la tabla de encuestas
+  irMode:"overall",          // "overall" | "buyer"
+  alarmTab:"ir_low",         // "ir_low" | "termination_high"
+};
+const charts = {};
+let _data = null;            // ultima respuesta -- para re-render sin refetch
+
+/* ═══════════════════════ DATA LOAD ═══════════════════════ */
+function queryString(){
+  const y = state.year;
+  const months = [...state.months].sort((a,b)=>a-b);
+  const mMin = months[0], mMax = months[months.length-1];
+  const lastDayMin = new Date(y, mMin, 0).getDate();
+  const lastDayMax = new Date(y, mMax, 0).getDate();
+  // el "Day" solo recorta los bordes del rango combinado: dayFrom dentro del
+  // primer mes elegido, dayTo dentro del ultimo -- los meses intermedios (si
+  // se eligen 3+ no consecutivos con huecos) quedan completos.
+  const df = Math.min(Math.max(1, state.dayFrom||1), lastDayMin);
+  const dt = Math.min(Math.max(1, state.dayTo||lastDayMax), lastDayMax);
+  const pad = n => String(n).padStart(2,"0");
+  const date_from = `${y}-${pad(mMin)}-${pad(df)}`;
+  const date_to   = `${y}-${pad(mMax)}-${pad(dt)}`;
+  const p = new URLSearchParams({
+    api:state.api, suppliers:[...state.suppliers].join(","),
+    date_from, date_to, type:state.type, status:state.status });
+  return "?"+p.toString();
+}
+let _live = false, _lastOkAt = null, _firstLoad = true;
+async function loadData(){
+  if(_firstLoad) showLoading(true);
+  const ctrl = new AbortController();
+  const timer = setTimeout(()=>ctrl.abort(), FETCH_TIMEOUT_MS);
+  try{
+    const res = await fetch(ENDPOINT+queryString(), {signal:ctrl.signal, headers:HEADERS});
+    if(!res.ok) throw new Error("HTTP "+res.status);
+    const data = await res.json();
+    clearTimeout(timer);
+    _live = true; _lastOkAt = Date.now();
+    document.getElementById("mock-badge").style.display = "none";
+    setLive(true);
+    render(data);
+  }catch(err){
+    clearTimeout(timer);
+    console.warn("dashboard: falling back to mock data —", err.message);
+    _live = false;
+    document.getElementById("mock-badge").style.display = "inline-block";
+    setLive(false);
+    if(_firstLoad) render(MOCK);          // keep last good data on a transient blip
+  }finally{
+    _firstLoad = false;
+    showLoading(false);
+  }
+}
+function setLive(on){
+  document.getElementById("live-dot").style.background   = on ? "var(--good)" : "var(--warn)";
+  document.getElementById("live-label").textContent      = on ? "Live" : "Reconnecting…";
+  document.getElementById("live-dot").style.animationPlayState = on ? "running" : "paused";
+  document.getElementById("mock-badge").style.display = on ? "none" : "inline-block";
+  document.getElementById("conn-banner").hidden = on;
+}
+function tickAgo(){
+  const el = document.getElementById("updated-ago");
+  if(!_lastOkAt){ el.textContent = _live ? "" : "no live data yet"; return; }
+  const s = Math.round((Date.now()-_lastOkAt)/1000);
+  el.textContent = s < 5 ? "updated just now" : `updated ${s}s ago`;
+}
+const showLoading = on => {
+  const el=document.getElementById("loading");
+  el.style.opacity = on?"1":"0"; el.style.pointerEvents = on?"auto":"none";
+};
+
+/* ═══════════════════════ RENDER ═══════════════════════ */
+function render(d){
+  _data = d;
+  updateAlarmItems(d);   // popup de alarmas activas -- reemplaza el envio a Telegram
+  /* header */
+  document.getElementById("last-update").textContent =
+    new Date(d.last_update).toLocaleString("en-US",{dateStyle:"short",timeStyle:"medium"});
+  if(d.period) document.getElementById("range-note").textContent =
+    `${d.period.date_from} → ${d.period.date_to}`;
+
+  /* summary table */
+  const tb = document.getElementById("summary-body");
+  tb.innerHTML = "";
+  (d.summary_rows||[]).forEach(r=>{
+    tb.insertAdjacentHTML("beforeend",
+      `<tr class="border-b" style="border-color:var(--border)">
+         <td>${r.year}</td><td>${r.month}</td><td>${int(r.surveys)}</td>
+         <td>${int(r.transactions)}</td><td>${int(r.completed)}</td>
+         <td>${pct(r.conv_rate)}</td><td>${money(r.cost)}</td><td>${money(r.revenue)}</td></tr>`);
+  });
+  const t=d.totals||{};
+  tb.insertAdjacentHTML("beforeend",
+    `<tr class="font-bold" style="background:var(--brand-soft);color:var(--brand-strong)">
+       <td>Total</td><td></td><td>${int(t.surveys)}</td><td>${int(t.transactions)}</td>
+       <td>${int(t.completed)}</td><td>${pct(t.conv_rate)}</td>
+       <td>${money(t.cost)}</td><td>${money(t.revenue)}</td></tr>`);
+
+  /* KPI groups */
+  const f=d.kpis.financial, m=d.kpis.management, s=d.kpis.statistical;
+  const delta = v => v==null ? "" :
+    `<span class="text-[10px] font-semibold ${v>=0?'delta-up':'delta-down'}">${v>=0?'▲':'▼'} ${Math.abs(v).toFixed(1)}%</span>`;
+  const tile = (label,val,sub="") =>
+    `<div><p class="text-[10px] uppercase tracking-wide" style="color:var(--muted)">${label}</p>
+       <p class="text-lg font-bold kpi-val">${val}</p>${sub?`<p class="text-[10px]">${sub}</p>`:""}</div>`;
+
+  document.getElementById("kpi-financial").innerHTML =
+    tile("Revenue", money(f.revenue), delta(f.revenue_delta_pct)) +
+    tile("Cost",    money(f.cost),    delta(f.cost_delta_pct)) +
+    tile("Profit",  money(f.profit),
+         `<span class="text-[10px] font-semibold px-1 rounded" style="background:var(--brand-soft);color:var(--brand-strong)">margin ${pct(f.margin_pct)}</span>`) +
+    tile("Conv. Rate", pct(f.conv_rate), delta(f.conv_rate_delta_pct));
+
+  document.getElementById("kpi-management").innerHTML =
+    tile("Eligible",            int(m.eligible)) +
+    tile("Blocked · floor",     int(m.blocked_profit_floor)) +
+    tile("Exclusion conflicts", int(m.blocked_exclusion)) +
+    tile("Awaiting CPI input",  int(m.awaiting_cpi_input)) +
+    tile("Auto-safe candidates",int(m.auto_safe_candidates)) +
+    tile("Decisions today",     int(m.decisions_today));
+
+  const dirWord = s.ir_direction==="up" ? "improving" : s.ir_direction==="down" ? "declining" : "flat";
+  const dirClass = s.ir_direction==="up" ? "delta-up" : s.ir_direction==="down" ? "delta-down" : "";
+  document.getElementById("kpi-statistical").innerHTML =
+    tile("IR (current)", pct(s.ir_current),
+         `<span class="text-[10px] font-semibold ${dirClass}">${s.ir_direction==='up'?'▲':s.ir_direction==='down'?'▼':'▪'} ${dirWord} · proj ${s.ir_projected_change>=0?'+':''}${s.ir_projected_change} pts</span>`) +
+    tile("IR slope / day", (s.ir_slope_per_day>=0?'+':'')+s.ir_slope_per_day+" pts") +
+    tile("Alarms · low IR",   int(s.alarms_low_ir),
+         s.alarms_low_ir>0?`<span class="text-[10px] font-semibold" style="color:var(--crit)">⚠ active</span>`:"") +
+    tile("Alarms · high term", int(s.alarms_high_term),
+         s.alarms_high_term>0?`<span class="text-[10px] font-semibold" style="color:var(--serious)">⚠ active</span>`:"") +
+    tile("Termination rate", pct(s.termination_rate_pct));
+
+  /* supplier ranking */
+  const rk=document.getElementById("ranking-body"); rk.innerHTML="";
+  (d.supplier_ranking||[]).forEach(r=>{
+    rk.insertAdjacentHTML("beforeend",
+      `<tr class="border-b cursor-pointer hover:bg-[var(--brand-soft)]" style="border-color:var(--border)"
+           onclick="filterByBuyer(null);document.getElementById('survey-filter').textContent='supplier: ${r.supplier}';document.getElementById('survey-filter').hidden=false;window._supFilter='${r.supplier}';renderExternal();">
+        <td>${r.supplier}</td><td class="text-right">${int(r.transactions)}</td>
+        <td class="text-right">${int(r.completes)}</td>
+        <td class="text-right">${r.conv_rate==null?'—':pct(r.conv_rate)}</td>
+        <td class="text-right">${r.avg_cpi==null?'—':'$'+r.avg_cpi}</td></tr>`);
+  });
+
+  /* alarms — tabs + counts */
+  const al = (d.alarms||[]);
+  const nIr = al.filter(a=>a.type==='ir_low').length, nTe = al.filter(a=>a.type==='termination_high').length;
+  document.getElementById("cnt-ir").textContent = `(${nIr})`;
+  document.getElementById("cnt-term").textContent = `(${nTe})`;
+  renderAlarms();
+
+  /* IR by-buyer list */
+  const bl=document.getElementById("irbuyer-list"); bl.innerHTML="";
+  (d.ir_trend_by_buyer||[]).forEach((b,i)=>{
+    const arrow = b.direction==='up'?'▲':b.direction==='down'?'▼':'▪';
+    const cls = b.direction==='up'?'delta-up':b.direction==='down'?'delta-down':'';
+    bl.insertAdjacentHTML("beforeend",
+      `<li class="flex items-baseline justify-between gap-2 cursor-pointer hover:underline"
+           onclick="filterByBuyer('${b.buyer.replace(/'/g,"\\'")}')">
+         <span class="flex items-center gap-1.5 min-w-0"><span class="w-2 h-2 rounded-sm shrink-0" style="background:${BUYER_COLORS[i%BUYER_COLORS.length]}"></span>
+         <span class="truncate">${b.buyer}</span></span>
+         <span class="shrink-0 tnum ${cls}">${b.ir_current==null?'—':b.ir_current+'%'} ${arrow} ${b.slope_per_day>=0?'+':''}${b.slope_per_day}</span></li>`);
+  });
+
+  /* trend caption */
+  document.getElementById("trend-caption").innerHTML =
+    `slope ${s.ir_slope_per_day>=0?'+':''}${s.ir_slope_per_day} pts/day · ` +
+    `projection ${s.ir_projected_change>=0?'+':''}${s.ir_projected_change} pts · ` +
+    `<span class="${dirClass}">${s.ir_direction==='up'?'▲':s.ir_direction==='down'?'▼':'▪'} ${dirWord}</span>`;
+
+  renderExternal();
+  drawCharts(d);
+}
+
+const BUYER_COLORS = [T.s1,T.s2,T.s3,'#e87ba4','#4a3aa7','#eda100'];
+
+/* ---- sub-renders que dependen de state (sin refetch) ---- */
+function renderExternal(){
+  if(!_data) return;
+  const eb=document.getElementById("external-body"); eb.innerHTML="";
+  const fb = document.getElementById("survey-filter");
+  let rows = _data.external_surveys||[];
+  if(state.buyerFilter){ rows = rows.filter(r=>r.buyer===state.buyerFilter);
+    fb.textContent = "buyer: "+state.buyerFilter+"  ✕"; fb.hidden=false; }
+  else if(window._supFilter){ rows = rows.filter(r=>r.supplier===window._supFilter);
+    fb.textContent = "supplier: "+window._supFilter+"  ✕"; fb.hidden=false; }
+  else fb.hidden = true;
+  rows.slice(0,120).forEach(r=>{
+    eb.insertAdjacentHTML("beforeend",
+      `<tr class="border-b" style="border-color:var(--border)">
+        <td class="max-w-[280px] truncate">${r.name}</td><td class="truncate max-w-[120px]">${r.buyer||'—'}</td>
+        <td>${r.supplier||'—'}</td>
+        <td class="text-right">${r.ir==null?'—':r.ir+'%'}</td>
+        <td class="text-right">${int(r.completed)}${r.quota?` / ${int(r.quota)}`:''}</td>
+        <td class="text-right">${r.conv_rate==null?'—':pct(r.conv_rate)}</td>
+        <td class="text-right">${r.terminate_rate==null?'—':pct(r.terminate_rate)}</td></tr>`);
+  });
+  if(!rows.length) eb.innerHTML = `<tr><td colspan="7" class="py-3 text-center" style="color:var(--muted)">no surveys</td></tr>`;
+}
+function renderAlarms(){
+  if(!_data) return;
+  const ab=document.getElementById("alarm-body"); ab.innerHTML="";
+  (_data.alarms||[]).filter(a=>a.type===state.alarmTab).slice(0,50).forEach(a=>{
+    ab.insertAdjacentHTML("beforeend",
+      `<tr class="border-b" style="border-color:var(--border)">
+        <td class="max-w-[280px] truncate">${a.survey_name}</td><td class="truncate max-w-[120px]">${a.buyer}</td>
+        <td class="text-right" style="color:var(--crit)">${a.value==null?'—':a.value+'%'}</td>
+        <td class="text-right">${a.threshold}%</td>
+        <td class="text-right" style="color:var(--muted)">${a.age_hours<24?a.age_hours+'h':Math.round(a.age_hours/24)+'d'}</td></tr>`);
+  });
+  if(!document.querySelector('#alarm-body tr')) ab.innerHTML =
+    `<tr><td colspan="5" class="py-3 text-center" style="color:var(--muted)">no active alarms</td></tr>`;
+}
+function filterByBuyer(buyer){
+  window._supFilter = null;
+  state.buyerFilter = (state.buyerFilter===buyer) ? null : buyer;
+  renderExternal();
+  document.querySelector('.card:has(#external-body)')?.scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+document.getElementById("survey-filter").addEventListener("click",()=>{
+  state.buyerFilter=null; window._supFilter=null; renderExternal();
+});
+
+/* ═══════════════════════ CHART DEFAULTS (dataviz mark specs) ═══════════════ */
+let _chartDefaultsDone = false;
+function applyChartDefaults(){
+  if(_chartDefaultsDone || typeof Chart === 'undefined') return;
+  Chart.defaults.font.family = 'system-ui,-apple-system,"Segoe UI",sans-serif';
+  Chart.defaults.font.size = 11;
+  Chart.defaults.color = T.ink2;
+  _chartDefaultsDone = true;
+}
+const GRID = { color:T.grid, drawTicks:false };
+const AXIS = { grid:GRID, border:{color:T.axis}, ticks:{color:T.muted} };
+const LEGEND = { position:'top', align:'start',
+  labels:{boxWidth:9,boxHeight:9,usePointStyle:true,pointStyle:'rectRounded',padding:12,color:T.ink2} };
+const TIP = { backgroundColor:'#ffffff', titleColor:T.ink, bodyColor:T.ink2,
+  borderColor:T.grid, borderWidth:1, padding:10, boxPadding:4, usePointStyle:true, cornerRadius:8 };
+
+/* paint(): update the chart in place when it already exists (smooth animated
+   transition on each live refresh) — only destroy+recreate on first draw or
+   when the chart type changed. */
+function paint(id, spec){
+  const ex = charts[id];
+  if(ex && ex.config.type === spec.type){
+    ex.data.labels = spec.data.labels;
+    spec.data.datasets.forEach((ds,i)=>{
+      if(ex.data.datasets[i]) Object.assign(ex.data.datasets[i], ds);
+      else ex.data.datasets[i] = ds;
+    });
+    ex.data.datasets.length = spec.data.datasets.length;
+    ex.options = spec.options;
+    ex.update();
+    return;
+  }
+  if(ex) ex.destroy();
+  const prev = Chart.getChart(id); if(prev) prev.destroy();
+  charts[id] = new Chart(document.getElementById(id).getContext('2d'), spec);
+}
+
+let _lastData = null, _chartRetries = 0;
+function drawCharts(d){
+  _lastData = d;
+  if(typeof Chart === 'undefined'){                         // CDN slow / blocked
+    if(_chartRetries++ < 20){ setTimeout(()=>drawCharts(_lastData), 500); }
+    document.querySelectorAll('main canvas').forEach(c=>{
+      if(!c.dataset.ph){ c.dataset.ph='1';
+        c.insertAdjacentHTML('afterend',
+          '<p class="chart-ph text-xs py-6 text-center" style="color:var(--muted)">chart library loading…</p>');
+        c.style.display='none'; }
+    });
+    return;
+  }
+  document.querySelectorAll('.chart-ph').forEach(e=>e.remove());
+  document.querySelectorAll('main canvas').forEach(c=>c.style.display='');
+  applyChartDefaults();
+
+  const donutOpts = {
+    maintainAspectRatio:false, cutout:'62%',
+    plugins:{ legend:{display:false} }
+  };
+  const htmlLegend = (elId, rows, colors) => {
+    document.getElementById(elId).innerHTML = rows.map((r,i)=>
+      `<li class="flex items-baseline justify-between gap-2">
+         <span class="flex items-center gap-1.5 min-w-0">
+           <span class="w-2.5 h-2.5 rounded-sm shrink-0" style="background:${colors[i]}"></span>
+           <span class="truncate" style="color:var(--ink-2)">${r.name}</span></span>
+         <b class="tnum shrink-0">${r.pct}%</b></li>`).join("");
+  };
+
+  const dsFill = (col,ds) => ({ borderColor:col, borderWidth:2, borderRadius:3,
+    borderSkipped:false, stack:'s', backgroundColor:col, ...ds });
+
+  /* ── donut: by supplier (categorical) ── */
+  const supColors=[T.s1,T.s2,T.s3,T.s2,T.s1,T.s3];
+  paint('chart-supplier',{
+    type:'doughnut',
+    data:{ labels:d.by_supplier.map(x=>x.name),
+      datasets:[{ data:d.by_supplier.map(x=>x.transactions),
+        backgroundColor:supColors.slice(0,d.by_supplier.length),
+        borderColor:T.surface, borderWidth:2, hoverOffset:6 }]},
+    options:{ ...donutOpts, animation:{duration:400}, plugins:{ ...donutOpts.plugins, tooltip:{...TIP,
+        callbacks:{ label:c=>` ${c.label}: ${int(c.raw)} (${d.by_supplier[c.dataIndex].pct}%)` }}}}
+  });
+  htmlLegend('legend-supplier', d.by_supplier, supColors);
+
+  /* ── donut: by status (status palette) ── */
+  const statusColor = n => ({Completed:T.good,Terminated:T.crit,Overquota:T.warn}[n]||T.muted);
+  const stColors=d.by_status.map(x=>statusColor(x.name));
+  paint('chart-status',{
+    type:'doughnut',
+    data:{ labels:d.by_status.map(x=>x.name),
+      datasets:[{ data:d.by_status.map(x=>x.transactions),
+        backgroundColor:stColors, borderColor:T.surface, borderWidth:2, hoverOffset:6 }]},
+    options:{ ...donutOpts, animation:{duration:400}, plugins:{ ...donutOpts.plugins, tooltip:{...TIP,
+        callbacks:{ label:c=>` ${c.label}: ${int(c.raw)} (${d.by_status[c.dataIndex].pct}%)` }}}}
+  });
+  htmlLegend('legend-status', d.by_status, stColors);
+
+  /* ── stacked bars: status by day (ONE axis, counts) ── */
+  paint('chart-statusday',{
+    type:'bar',
+    data:{ labels:d.status_by_day.map(x=>x.day), datasets:[
+      dsFill(T.good, {label:'Completed',  data:d.status_by_day.map(x=>x.completed)}),
+      dsFill(T.warn, {label:'Overquota',  data:d.status_by_day.map(x=>x.overquota)}),
+      dsFill(T.crit, {label:'Terminated', data:d.status_by_day.map(x=>x.terminate)}) ]},
+    options:{ maintainAspectRatio:false, animation:{duration:400},
+      interaction:{mode:'index',intersect:false},
+      scales:{ x:{...AXIS, stacked:true}, y:{...AXIS, stacked:true, beginAtZero:true} },
+      plugins:{ legend:LEGEND, tooltip:{...TIP} } }
+  });
+
+  /* ── line: IR — overall+regression  OR  one line per buyer ── */
+  document.getElementById("irbuyer-list").hidden = (state.irMode !== "buyer");
+  let irDatasets, irLabels;
+  if(state.irMode === "buyer" && (d.ir_trend_by_buyer||[]).length){
+    irLabels = (d.ir_trend_by_buyer[0].points||[]).map(x=>x.day);
+    irDatasets = d.ir_trend_by_buyer.map((b,i)=>({
+      label:b.buyer, data:b.points.map(x=>x.ir),
+      borderColor:BUYER_COLORS[i%BUYER_COLORS.length], backgroundColor:BUYER_COLORS[i%BUYER_COLORS.length],
+      borderWidth:2, pointRadius:2, pointHoverRadius:5, tension:.25 }));
+  } else {
+    irLabels = d.ir_trend.map(x=>x.day);
+    irDatasets = [
+      { label:'IR measured', data:d.ir_trend.map(x=>x.ir),
+        borderColor:T.s1, backgroundColor:T.s1, borderWidth:2, pointRadius:3, pointHoverRadius:6, tension:.25 },
+      { label:'Regression / projection', data:d.ir_trend_fit.map(x=>x.ir),
+        borderColor:T.trend, backgroundColor:T.trend, borderWidth:2, borderDash:[6,4], pointRadius:0, pointHoverRadius:0 } ];
+  }
+  paint('chart-irtrend',{
+    type:'line',
+    data:{ labels:irLabels, datasets:irDatasets },
+    options:{ maintainAspectRatio:false, animation:{duration:400},
+      interaction:{mode:'index',intersect:false},
+      scales:{ x:AXIS, y:{...AXIS, ticks:{...AXIS.ticks, callback:v=>(Math.round(v*10)/10)+'%'}} },
+      plugins:{ legend:LEGEND, tooltip:{...TIP,
+        callbacks:{ label:c=>` ${c.dataset.label}: ${c.raw}%` }}}}
+  });
+
+  /* ── line: revenue vs cost by day (ONE $ axis) ── */
+  paint('chart-revenue',{
+    type:'line',
+    data:{ labels:d.revenue_by_day.map(x=>x.day), datasets:[
+      { label:'Revenue', data:d.revenue_by_day.map(x=>x.revenue),
+        borderColor:T.good, backgroundColor:'rgba(12,163,12,.10)', fill:true,
+        borderWidth:2, pointRadius:3, pointHoverRadius:6, tension:.25 },
+      { label:'Cost', data:d.revenue_by_day.map(x=>x.cost),
+        borderColor:T.s2, backgroundColor:T.s2, borderWidth:2, pointRadius:3, pointHoverRadius:6, tension:.25 } ]},
+    options:{ maintainAspectRatio:false, animation:{duration:400},
+      interaction:{mode:'index',intersect:false},
+      scales:{ x:AXIS, y:{...AXIS, ticks:{...AXIS.ticks, callback:v=>'$'+int(v)}} },
+      plugins:{ legend:LEGEND, tooltip:{...TIP,
+        callbacks:{ label:c=>` ${c.dataset.label}: ${money(c.raw)}` }}}}
+  });
+}
+
+/* ═══════════════════════ AGENT INSIGHTS + ALARMS POPUP ═══════════════════════
+   Un solo popup cicla entre oportunidades de margen (insights) y alarmas
+   activas (IR bajo / termino alto, de d.alarms en dashboard-metrics) -- mismo
+   Next para ambos tipos. Reemplaza el envio de alarmas a Telegram (pedido del
+   usuario, 2026-09-16): la alarma ahora se ve aca, no en el celular. */
+let _insights = [], _alarmItems = [], _insIdx = 0, _insDismissed = new Set();
+function popupItems(){
+  return [..._insights, ..._alarmItems].filter(x=>!_insDismissed.has(x.id));
+}
+function alarmToItem(a){
+  const label = a.type === "ir_low" ? "IR LOW" : "TERMINATION HIGH";
+  return {
+    id: `alarm-${a.type}-${a.survey_name}-${a.triggered_at}`,
+    kind: "alarm",
+    title: `${label} — ${a.survey_name}`,
+    evidence: `${a.buyer} · value ${a.value}% vs threshold ${a.threshold}% · triggered ${a.age_hours}h ago`,
+  };
+}
+function updateAlarmItems(d){
+  _alarmItems = (d.alarms || []).map(alarmToItem);
+  renderPopup();
+}
+async function loadInsights(){
+  try{
+    const ctrl = new AbortController();
+    const t = setTimeout(()=>ctrl.abort(), FETCH_TIMEOUT_MS);
+    const res = await fetch(INSIGHTS_ENDPOINT, {signal:ctrl.signal, headers:HEADERS});
+    clearTimeout(t);
+    if(!res.ok) throw new Error("HTTP "+res.status);
+    const j = await res.json();
+    _insights = (j.insights||[]).map(x=>({...x, kind:"insight"}));
+  }catch(e){
+    _insights = _insights.length ? _insights :
+      [{id:"demo",kind:"insight",title:"Prime: lower CPI 5% ($1.45 → $1.38)",
+        evidence:"Last 14d: 210 completes on 240 transactions (87% conversion) at avg CPI $1.45.",
+        recommendation:"Reduce CPI paid to Prime by 5%.",
+        projected_gain_usd:300,
+        assumption:"Assumes fill rate holds at the lower CPI — validate against history first.",
+        confidence:"to_validate",
+        action:{label:"Apply: CPI → $1.38"}}];
+  }
+  renderPopup();
+}
+function renderPopup(){
+  const pop = document.getElementById("agent-pop");
+  const items = popupItems();
+  if(!items.length){ pop.classList.remove("show"); return; }
+  if(_insIdx >= items.length) _insIdx = 0;
+  const it = items[_insIdx];
+  const isAlarm = it.kind === "alarm";
+  document.getElementById("pop-badge").textContent = isAlarm ? "🚨 Active alarm" : "⚡ Margin opportunity";
+  document.getElementById("pop-badge").style.color = isAlarm ? "var(--crit)" : "var(--brand-strong)";
+  document.getElementById("pop-count").textContent = items.length>1 ? `(${_insIdx+1}/${items.length})` : "";
+  document.getElementById("pop-title").textContent = it.title;
+  document.getElementById("pop-evidence").textContent = it.evidence || "";
+  document.getElementById("pop-gain").textContent =
+    it.projected_gain_usd != null ? `Projected +${money(it.projected_gain_usd)} for the period` : "";
+  document.getElementById("pop-assumption").textContent = it.assumption || "";
+  document.getElementById("pop-apply").style.display = isAlarm ? "none" : "";
+  document.getElementById("pop-apply").textContent = (it.action && it.action.label) || "Apply";
+  document.getElementById("pop-footer").textContent = isAlarm
+    ? "Live alarm from the poller — was previously sent to Telegram, now shown here only."
+    : "Advisory only — the button routes to human approval, the agent never changes price itself.";
+  pop.classList.add("show");
+}
+document.getElementById("pop-close").onclick   = ()=>document.getElementById("agent-pop").classList.remove("show");
+document.getElementById("pop-dismiss").onclick = ()=>{ const it=popupItems()[_insIdx]; if(it) _insDismissed.add(it.id);
+  renderPopup(); };
+document.getElementById("pop-next").onclick    = ()=>{ _insIdx=(_insIdx+1)%Math.max(popupItems().length,1); renderPopup(); };
+document.getElementById("pop-apply").onclick   = ()=>{
+  const it=popupItems()[_insIdx]; if(!it || it.kind==="alarm") return;
+  alert("Routed to human approval:\n\n"+it.recommendation+"\n\n"+(it.assumption||"")+
+        "\n\n(The agent never changes price itself — this opens the approval step.)");
+};
+
+/* ═══════════════════════ SLICER WIRING ═══════════════════════ */
+let debounce;
+const reload = () => { clearTimeout(debounce); debounce = setTimeout(loadData, 250); };
+
+document.querySelectorAll('[data-api]').forEach(b=>b.addEventListener('click',()=>{
+  document.querySelectorAll('[data-api]').forEach(x=>x.setAttribute('aria-pressed','false'));
+  b.setAttribute('aria-pressed','true'); state.api=b.dataset.api; reload();
+}));
+document.querySelectorAll('[data-supplier]').forEach(b=>b.addEventListener('click',()=>{
+  const on = b.getAttribute('aria-pressed')==='true';
+  b.setAttribute('aria-pressed', on?'false':'true');
+  on ? state.suppliers.delete(b.dataset.supplier) : state.suppliers.add(b.dataset.supplier);
+  reload();
+}));
+const bind = (id,key)=>document.getElementById(id).addEventListener('change',e=>{
+  state[key] = e.target.value; reload();
+});
+bind('type-survey','type'); bind('status-report','status');
+
+// Year: un solo anio a la vez (mezclar anios no tiene un rango "acumulado" claro).
+document.querySelectorAll('#year-picker input[type=checkbox]').forEach(cb=>cb.addEventListener('change',()=>{
+  document.querySelectorAll('#year-picker input[type=checkbox]').forEach(x=>x.checked=false);
+  cb.checked = true; state.year = parseInt(cb.dataset.year,10); reload();
+}));
+// Month: multi-seleccion -- se puede marcar mas de un mes (ej. Aug + Sep) y se
+// pide un solo rango [primer mes elegido, ultimo mes elegido] al backend, que
+// ya agrupa por (year,month) en summary_rows. Nunca se permite dejar 0 meses.
+document.querySelectorAll('#month-picker input[type=checkbox]').forEach(cb=>cb.addEventListener('change',()=>{
+  const checked = [...document.querySelectorAll('#month-picker input[type=checkbox]:checked')];
+  if(checked.length === 0){ cb.checked = true; return; }
+  state.months = new Set(checked.map(x=>parseInt(x.dataset.month,10)));
+  reload();
+}));
+// Day from/to -> recorta el mes elegido
+document.getElementById('day-from').addEventListener('change', e=>{
+  state.dayFrom = parseInt(e.target.value,10) || 1; reload();
+});
+document.getElementById('day-to').addEventListener('change', e=>{
+  state.dayTo = parseInt(e.target.value,10) || 31; reload();
+});
+function syncDatePickerUI(){
+  document.querySelectorAll('#year-picker input[type=checkbox]').forEach(x=>
+    x.checked = (parseInt(x.dataset.year,10)===state.year));
+  document.querySelectorAll('#month-picker input[type=checkbox]').forEach(x=>
+    x.checked = state.months.has(parseInt(x.dataset.month,10)));
+  document.getElementById('day-from').value = state.dayFrom;
+  document.getElementById('day-to').value = state.dayTo;
+}
+syncDatePickerUI();
+// IR trend mode (overall | by buyer) -- re-render, no refetch
+document.querySelectorAll('[data-irmode]').forEach(b=>b.addEventListener('click',()=>{
+  document.querySelectorAll('[data-irmode]').forEach(x=>x.setAttribute('aria-pressed','false'));
+  b.setAttribute('aria-pressed','true'); state.irMode=b.dataset.irmode;
+  if(_data){ document.getElementById("irbuyer-list").hidden=(state.irMode!=="buyer"); drawCharts(_data); }
+}));
+// alarm tabs (low IR | high termination) -- re-render, no refetch
+document.querySelectorAll('[data-alarm]').forEach(b=>b.addEventListener('click',()=>{
+  document.querySelectorAll('[data-alarm]').forEach(x=>x.setAttribute('aria-pressed','false'));
+  b.setAttribute('aria-pressed','true'); state.alarmTab=b.dataset.alarm; renderAlarms();
+}));
+
+document.getElementById('clear-slicers').addEventListener('click',()=>{
+  state.api="open_lab"; state.suppliers=new Set(["Digaygane","Lucid","Prime"]);
+  state.year=today.getFullYear(); state.months=new Set([today.getMonth()+1]);
+  state.dayFrom=1; state.dayTo=today.getDate();
+  state.type="all"; state.status="all";
+  state.buyerFilter=null; window._supFilter=null;
+  document.querySelectorAll('[data-api]').forEach(x=>x.setAttribute('aria-pressed', x.dataset.api==="open_lab"?'true':'false'));
+  document.querySelectorAll('[data-supplier]').forEach(x=>x.setAttribute('aria-pressed','true'));
+  syncDatePickerUI();
+  document.getElementById('type-survey').value="all"; document.getElementById('status-report').value="all";
+  reload();
+});
+
+/* ═══════════════════════ BOOT ═══════════════════════ */
+loadData();
+loadInsights();
+setInterval(tickAgo, 1000);
+if(AUTO_REFRESH_MS>0){
+  setInterval(loadData, AUTO_REFRESH_MS);
+  setInterval(loadInsights, AUTO_REFRESH_MS * 3);   // insights change slower
+}
+</script>
+</body>
+</html>

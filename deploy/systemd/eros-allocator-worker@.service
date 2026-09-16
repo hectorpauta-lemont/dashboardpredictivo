@@ -1,0 +1,34 @@
+# Unidad instanciada para los workers manuales del allocator.
+#   %i = run_allocator  |  run_earnings_tracker
+# Se arranca SIEMPRE mediante deploy/scripts/start-worker.sh, que escribe el
+# archivo de parametros /run/eros-allocator/worker-%i.env antes de iniciar.
+# Deshabilitada por defecto (bootstrap y cada deploy la detienen): el sondeo
+# es deliberadamente manual, igual que eros-screening en eros-prime-gate.
+
+[Unit]
+Description=EROS Allocator worker (%i) -- manual, via start-worker.sh
+After=network-online.target
+Wants=network-online.target
+AssertPathExists=/run/eros-allocator/worker-%i.env
+
+[Service]
+Type=simple
+User=eros-allocator
+Group=eros-allocator
+WorkingDirectory=/opt/eros-allocator
+EnvironmentFile=/etc/eros-allocator/eros.env
+EnvironmentFile=/run/eros-allocator/worker-%i.env
+Environment=HOME=/opt/eros-allocator
+ExecStart=/opt/eros-allocator/venv/bin/python manage.py %i --hours ${WORKER_HOURS} --limit ${WORKER_LIMIT} --delay ${WORKER_DELAY} --poll-interval ${WORKER_POLL_INTERVAL}
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=eros-allocator-worker
+Restart=always
+RestartSec=30
+TimeoutStopSec=30
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
