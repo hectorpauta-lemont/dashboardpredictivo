@@ -18,3 +18,14 @@ docs/DEPLOY_INTERNAL.md
 # Exports/reportes reales importados manualmente para analisis puntuales
 # (datos de reconciliacion, PII de sesion, etc.) -- nunca al repo.
 data_imports/
+
+# Local startup backups and private drafts
+deploy/local-backups/
+.env.*
+!.env.example
+*.sqlite3*
+.aws/
+*.pem
+*.key
+dashboard-predictivo-brief.txt
+mockupindex.html.txt

@@ -73,6 +73,10 @@
   .slicer-btn[aria-pressed="true"]{
      border-color:var(--brand);color:var(--brand-strong);background:var(--brand-soft);font-weight:600;}
   .grp-label{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);}
+  .picker-item{padding:4px 6px;border-radius:6px;}
+  .picker-item:hover{background:var(--brand-soft);}
+  .picker-item:has(input:checked){background:var(--brand-soft);color:var(--brand-strong);font-weight:600;}
+  .picker-item input[type=checkbox]{accent-color:var(--brand);}
   .delta-up{color:var(--good);} .delta-down{color:var(--crit);}
   table.compact th,table.compact td{padding:.35rem .5rem;}
   ::-webkit-scrollbar{height:8px;width:8px}
@@ -130,19 +134,44 @@
   <!-- ── SIDEBAR / SLICERS ───────────────────────────────────────────────── -->
   <aside class="col-span-12 lg:col-span-3 card p-4 flex flex-col gap-4 h-max lg:sticky lg:top-4 lg:self-start">
     <div>
-      <p class="grp-label mb-2">API</p>
-      <div class="grid grid-cols-2 gap-2">
-        <button class="slicer-btn py-2 text-xs" data-api="open_lab"  aria-pressed="true">Open Lab API</button>
-        <button class="slicer-btn py-2 text-xs" data-api="symmetric" aria-pressed="false">Symmetric API</button>
+      <p class="grp-label mb-2">Client</p>
+      <div class="relative">
+        <button type="button" id="buyer-trigger"
+                class="slicer-btn w-full py-2 px-3 text-xs flex items-center justify-between">
+          <span id="buyer-trigger-label">All</span>
+          <span style="color:var(--muted)">▾</span>
+        </button>
+        <div id="buyer-panel" hidden
+             class="card shadow-xl p-2 absolute z-30 mt-1.5 w-full" style="border-color:var(--brand-line)">
+          <div id="buyer-picker" class="flex flex-col gap-0.5 max-h-52 overflow-y-auto pr-1"></div>
+          <div class="flex items-center gap-2 mt-2 pt-2 border-t" style="border-color:var(--border)">
+            <button type="button" id="buyer-clear" class="text-[11px] px-2 py-1 rounded" style="color:var(--muted)">Clear</button>
+            <button type="button" id="buyer-done"
+                    class="text-[11px] font-semibold px-2.5 py-1 rounded ml-auto"
+                    style="background:var(--brand);color:#fff">Done</button>
+          </div>
+        </div>
       </div>
     </div>
 
     <div class="border-t pt-3" style="border-color:var(--border)">
-      <p class="grp-label mb-2">Suppliers</p>
-      <div class="flex flex-col gap-2">
-        <button class="slicer-btn py-2 text-xs" data-supplier="Digaygane" aria-pressed="true">Digaygane</button>
-        <button class="slicer-btn py-2 text-xs" data-supplier="Lucid"     aria-pressed="true">Lucid</button>
-        <button class="slicer-btn py-2 text-xs" data-supplier="Prime"     aria-pressed="true">Prime</button>
+      <p class="grp-label mb-2">Provider</p>
+      <div class="relative">
+        <button type="button" id="supplier-trigger"
+                class="slicer-btn w-full py-2 px-3 text-xs flex items-center justify-between">
+          <span id="supplier-trigger-label">All</span>
+          <span style="color:var(--muted)">▾</span>
+        </button>
+        <div id="supplier-panel" hidden
+             class="card shadow-xl p-2 absolute z-30 mt-1.5 w-full" style="border-color:var(--brand-line)">
+          <div id="supplier-picker" class="flex flex-col gap-0.5 max-h-52 overflow-y-auto pr-1"></div>
+          <div class="flex items-center gap-2 mt-2 pt-2 border-t" style="border-color:var(--border)">
+            <button type="button" id="supplier-clear" class="text-[11px] px-2 py-1 rounded" style="color:var(--muted)">Clear</button>
+            <button type="button" id="supplier-done"
+                    class="text-[11px] font-semibold px-2.5 py-1 rounded ml-auto"
+                    style="background:var(--brand);color:#fff">Done</button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -325,7 +354,7 @@
       <div class="max-h-[300px] overflow-y-auto"><table class="w-full text-xs compact tnum">
         <thead class="sticky top-0" style="background:var(--surface)"><tr style="color:var(--muted)" class="text-left border-b">
           <th>Survey</th><th>Buyer</th><th class="text-right">Value</th>
-          <th class="text-right">Threshold</th><th class="text-right">Age</th>
+          <th class="text-right">Threshold</th><th class="text-right" title="LOI real − LOI prometido (minutos)">Var (LOI)</th>
         </tr></thead>
         <tbody id="alarm-body"></tbody>
       </table></div>
@@ -350,6 +379,7 @@
             <th>Survey</th><th>Buyer</th><th>Supplier</th>
             <th class="text-right">IR</th><th class="text-right">Completed</th>
             <th class="text-right">Conv_Rate</th><th class="text-right">Term_Rate</th>
+            <th class="text-right" title="LOI real − LOI prometido (minutos)">Var (LOI)</th>
           </tr>
         </thead>
         <tbody id="external-body"></tbody>
@@ -364,8 +394,7 @@
 </footer>
 
 <!-- ══ AGENT INSIGHT POPUP (LangChain agent — Phase 2; deterministic v1 for now) ══
-     Cicla entre oportunidades de margen y alarmas activas (IR bajo / termino
-     alto) -- mismo popup, mismo boton Next para ambos tipos. -->
+     Solo oportunidades de margen -- las alarmas IR/terminacion ya no van aca. -->
 <div id="agent-pop" class="card shadow-xl p-4" style="border-color:var(--brand-line)">
   <div class="flex items-center justify-between mb-1">
     <span class="text-[10px] font-bold uppercase tracking-wider">
@@ -397,7 +426,7 @@ const API_KEY         = "";                          // X-API-Key; injected serv
 const BASE = (location.protocol === "http:" || location.protocol === "https:") ? location.origin : API_BASE;
 const ENDPOINT          = BASE + "/api/dashboard-metrics/";
 const INSIGHTS_ENDPOINT = BASE + "/api/agent-insights/";
-const FETCH_TIMEOUT_MS = 15000;       // dev SQLite is slow; prod Postgres is fast
+const FETCH_TIMEOUT_MS = 60000;       // dev SQLite is slow (1ra consulta en frio ~35s); prod Postgres is fast
 const AUTO_REFRESH_MS  = 20000;        // live polling; 0 = off
 const HEADERS = API_KEY ? {"Accept":"application/json","X-API-Key":API_KEY} : {"Accept":"application/json"};
 
@@ -445,8 +474,8 @@ const MOCK = {
      revenue:[2450,3120,2680,2110,2890,2530,2620][i],
      cost:[1690,2160,1850,1460,1990,1750,1859][i]})),
   external_surveys:[
-    {name:"30607 — Nationwide Native American study",buyer:"Symmetric API",supplier:"Prime",status:"Live",ir:44,completed:320,quota:400,conv_rate:44.1,terminate_rate:18.0},
-    {name:"PG AH SP 193888218",buyer:"Open Lab API",supplier:"Lucid",status:"Live",ir:38,completed:210,quota:300,conv_rate:38.7,terminate_rate:22.4},
+    {name:"30607 — Nationwide Native American study",buyer:"Symmetric API",supplier:"Prime",status:"Live",ir:44,completed:320,quota:400,conv_rate:44.1,terminate_rate:18.0,loi:12,expected_loi:9,loi_var:3},
+    {name:"PG AH SP 193888218",buyer:"Open Lab API",supplier:"Lucid",status:"Live",ir:38,completed:210,quota:300,conv_rate:38.7,terminate_rate:22.4,loi:6,expected_loi:8,loi_var:-2},
     {name:"SG AH EN 44509568",buyer:"Open Lab API",supplier:"Lucid",status:"Live",ir:41,completed:189,quota:260,conv_rate:41.2,terminate_rate:19.9},
     {name:"116552 W5 65625065",buyer:"Symmetric API",supplier:"Prime",status:"Live",ir:47,completed:540,quota:540,conv_rate:46.9,terminate_rate:12.1}
   ],
@@ -460,16 +489,16 @@ const MOCK = {
     {buyer:"Symmetric API",points:DAYS.map((d,i)=>({day:d,ir:[45,44,45,44,45,44,45][i]})),ir_current:45,slope_per_day:0.05,direction:"flat",projected_change:0.3}
   ],
   alarms:[
-    {survey_name:"OL AH EN 2039930",buyer:"Open Lab API",type:"termination_high",value:100.0,threshold:50.0,triggered_at:"2026-09-09T02:00:00Z",age_hours:9.9},
-    {survey_name:"OL AH EN 2038219",buyer:"Open Lab API",type:"ir_low",value:0.0,threshold:11.0,triggered_at:"2026-09-09T04:00:00Z",age_hours:7.4}
+    {survey_name:"OL AH EN 2039930",buyer:"Open Lab API",type:"termination_high",value:100.0,threshold:50.0,triggered_at:"2026-09-09T02:00:00Z",loi:12,expected_loi:7,loi_var:5},
+    {survey_name:"OL AH EN 2038219",buyer:"Open Lab API",type:"ir_low",value:0.0,threshold:11.0,triggered_at:"2026-09-09T04:00:00Z",loi:4,expected_loi:8,loi_var:-4}
   ]
 };
 
 /* ═══════════════════════ STATE ═══════════════════════ */
 const today = new Date();
 const state = {
-  api:"open_lab",
-  suppliers:new Set(["Digaygane","Lucid","Prime"]),
+  buyers:new Set(),       // vacio = todos los clientes, sin filtro
+  suppliers:new Set(),    // vacio = todos los proveedores, sin filtro
   year:today.getFullYear(), months:new Set([today.getMonth()+1]),
   dayFrom:1, dayTo:today.getDate(),
   type:"all", status:"all",
@@ -496,7 +525,7 @@ function queryString(){
   const date_from = `${y}-${pad(mMin)}-${pad(df)}`;
   const date_to   = `${y}-${pad(mMax)}-${pad(dt)}`;
   const p = new URLSearchParams({
-    api:state.api, suppliers:[...state.suppliers].join(","),
+    buyers:[...state.buyers].join(","), suppliers:[...state.suppliers].join(","),
     date_from, date_to, type:state.type, status:state.status });
   return "?"+p.toString();
 }
@@ -547,7 +576,7 @@ const showLoading = on => {
 /* ═══════════════════════ RENDER ═══════════════════════ */
 function render(d){
   _data = d;
-  updateAlarmItems(d);   // popup de alarmas activas -- reemplaza el envio a Telegram
+  renderFilterPickers(d);
   /* header */
   document.getElementById("last-update").textContent =
     new Date(d.last_update).toLocaleString("en-US",{dateStyle:"short",timeStyle:"medium"});
@@ -669,9 +698,20 @@ function renderExternal(){
         <td class="text-right">${r.ir==null?'—':r.ir+'%'}</td>
         <td class="text-right">${int(r.completed)}${r.quota?` / ${int(r.quota)}`:''}</td>
         <td class="text-right">${r.conv_rate==null?'—':pct(r.conv_rate)}</td>
-        <td class="text-right">${r.terminate_rate==null?'—':pct(r.terminate_rate)}</td></tr>`);
+        <td class="text-right">${r.terminate_rate==null?'—':pct(r.terminate_rate)}</td>
+        ${loiVarCell(r)}</tr>`);
   });
-  if(!rows.length) eb.innerHTML = `<tr><td colspan="7" class="py-3 text-center" style="color:var(--muted)">no surveys</td></tr>`;
+  if(!rows.length) eb.innerHTML = `<tr><td colspan="8"class="py-3 text-center" style="color:var(--muted)">no surveys</td></tr>`;
+}
+/* LOI real − prometido, en minutos: se paga/cobra por minuto de entrevista.
+   Rojo ▲ = tarda mas de lo prometido; verde ▼ = cumple (igual o menos). */
+function loiVarCell(a){
+  if(a.loi_var==null)
+    return `<td class="text-right" style="color:var(--muted)" title="sin completes todavia">—</td>`;
+  const over = a.loi_var > 0;
+  const txt  = `${over?'+':a.loi_var<0?'−':''}${Math.abs(a.loi_var)} min ${over?'▲':'▼'}`;
+  return `<td class="text-right font-semibold whitespace-nowrap" style="color:var(${over?'--crit':'--good'})"
+    title="LOI real ${a.loi} min vs prometido ${a.expected_loi} min">${txt}</td>`;
 }
 function renderAlarms(){
   if(!_data) return;
@@ -682,7 +722,7 @@ function renderAlarms(){
         <td class="max-w-[280px] truncate">${a.survey_name}</td><td class="truncate max-w-[120px]">${a.buyer}</td>
         <td class="text-right" style="color:var(--crit)">${a.value==null?'—':a.value+'%'}</td>
         <td class="text-right">${a.threshold}%</td>
-        <td class="text-right" style="color:var(--muted)">${a.age_hours<24?a.age_hours+'h':Math.round(a.age_hours/24)+'d'}</td></tr>`);
+        ${loiVarCell(a)}</tr>`);
   });
   if(!document.querySelector('#alarm-body tr')) ab.innerHTML =
     `<tr><td colspan="5" class="py-3 text-center" style="color:var(--muted)">no active alarms</td></tr>`;
@@ -850,27 +890,13 @@ function drawCharts(d){
   });
 }
 
-/* ═══════════════════════ AGENT INSIGHTS + ALARMS POPUP ═══════════════════════
-   Un solo popup cicla entre oportunidades de margen (insights) y alarmas
-   activas (IR bajo / termino alto, de d.alarms en dashboard-metrics) -- mismo
-   Next para ambos tipos. Reemplaza el envio de alarmas a Telegram (pedido del
-   usuario, 2026-09-16): la alarma ahora se ve aca, no en el celular. */
-let _insights = [], _alarmItems = [], _insIdx = 0, _insDismissed = new Set();
+/* ═══════════════════════ AGENT INSIGHTS POPUP ═══════════════════════
+   Solo oportunidades de negocio. Las alarmas de IR bajo / terminacion alta
+   ya NO van al popup (pedido del usuario, 2026-09-24): con mas demanda serian
+   interminables. Siguen visibles en el panel "Performance alarms". */
+let _insights = [], _insIdx = 0, _insDismissed = new Set();
 function popupItems(){
-  return [..._insights, ..._alarmItems].filter(x=>!_insDismissed.has(x.id));
-}
-function alarmToItem(a){
-  const label = a.type === "ir_low" ? "IR LOW" : "TERMINATION HIGH";
-  return {
-    id: `alarm-${a.type}-${a.survey_name}-${a.triggered_at}`,
-    kind: "alarm",
-    title: `${label} — ${a.survey_name}`,
-    evidence: `${a.buyer} · value ${a.value}% vs threshold ${a.threshold}% · triggered ${a.age_hours}h ago`,
-  };
-}
-function updateAlarmItems(d){
-  _alarmItems = (d.alarms || []).map(alarmToItem);
-  renderPopup();
+  return _insights.filter(x=>!_insDismissed.has(x.id));
 }
 async function loadInsights(){
   try{
@@ -899,20 +925,13 @@ function renderPopup(){
   if(!items.length){ pop.classList.remove("show"); return; }
   if(_insIdx >= items.length) _insIdx = 0;
   const it = items[_insIdx];
-  const isAlarm = it.kind === "alarm";
-  document.getElementById("pop-badge").textContent = isAlarm ? "🚨 Active alarm" : "⚡ Margin opportunity";
-  document.getElementById("pop-badge").style.color = isAlarm ? "var(--crit)" : "var(--brand-strong)";
   document.getElementById("pop-count").textContent = items.length>1 ? `(${_insIdx+1}/${items.length})` : "";
   document.getElementById("pop-title").textContent = it.title;
   document.getElementById("pop-evidence").textContent = it.evidence || "";
   document.getElementById("pop-gain").textContent =
     it.projected_gain_usd != null ? `Projected +${money(it.projected_gain_usd)} for the period` : "";
   document.getElementById("pop-assumption").textContent = it.assumption || "";
-  document.getElementById("pop-apply").style.display = isAlarm ? "none" : "";
   document.getElementById("pop-apply").textContent = (it.action && it.action.label) || "Apply";
-  document.getElementById("pop-footer").textContent = isAlarm
-    ? "Live alarm from the poller — was previously sent to Telegram, now shown here only."
-    : "Advisory only — the button routes to human approval, the agent never changes price itself.";
   pop.classList.add("show");
 }
 document.getElementById("pop-close").onclick   = ()=>document.getElementById("agent-pop").classList.remove("show");
@@ -920,7 +939,7 @@ document.getElementById("pop-dismiss").onclick = ()=>{ const it=popupItems()[_in
   renderPopup(); };
 document.getElementById("pop-next").onclick    = ()=>{ _insIdx=(_insIdx+1)%Math.max(popupItems().length,1); renderPopup(); };
 document.getElementById("pop-apply").onclick   = ()=>{
-  const it=popupItems()[_insIdx]; if(!it || it.kind==="alarm") return;
+  const it=popupItems()[_insIdx]; if(!it) return;
   alert("Routed to human approval:\n\n"+it.recommendation+"\n\n"+(it.assumption||"")+
         "\n\n(The agent never changes price itself — this opens the approval step.)");
 };
@@ -929,16 +948,80 @@ document.getElementById("pop-apply").onclick   = ()=>{
 let debounce;
 const reload = () => { clearTimeout(debounce); debounce = setTimeout(loadData, 250); };
 
-document.querySelectorAll('[data-api]').forEach(b=>b.addEventListener('click',()=>{
-  document.querySelectorAll('[data-api]').forEach(x=>x.setAttribute('aria-pressed','false'));
-  b.setAttribute('aria-pressed','true'); state.api=b.dataset.api; reload();
-}));
-document.querySelectorAll('[data-supplier]').forEach(b=>b.addEventListener('click',()=>{
-  const on = b.getAttribute('aria-pressed')==='true';
-  b.setAttribute('aria-pressed', on?'false':'true');
-  on ? state.suppliers.delete(b.dataset.supplier) : state.suppliers.add(b.dataset.supplier);
-  reload();
-}));
+// Client / Provider: checklists poblados dinamicamente desde
+// filters.available_buyers/available_suppliers (ver renderFilterPickers) --
+// se construyen una sola vez cuando llega el primer dato real, no son fijos
+// en el HTML. Ningun checkbox marcado = sin filtro (todos).
+function buildCheckboxList(container, items, datasetKey, onChange){
+  container.innerHTML = "";
+  items.forEach(name=>{
+    const label = document.createElement('label');
+    label.className = "picker-item flex items-center gap-1.5 text-xs cursor-pointer";
+    const cb = document.createElement('input');
+    cb.type = "checkbox";
+    cb.dataset[datasetKey] = name;
+    cb.addEventListener('change', onChange);
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(name));
+    container.appendChild(label);
+  });
+}
+function updateTriggerLabel(triggerLabelEl, selectedSet){
+  triggerLabelEl.textContent = selectedSet.size === 0 ? "All"
+    : selectedSet.size === 1 ? [...selectedSet][0]
+    : `${selectedSet.size} selected`;
+}
+// Vinieta: boton -> panel flotante con casillas -> clic afuera o "Done" cierra.
+function wireDropdownPicker({triggerId, panelId, pickerId, clearId, doneId, datasetKey, stateKey}){
+  const trigger = document.getElementById(triggerId);
+  const panel = document.getElementById(panelId);
+  const picker = document.getElementById(pickerId);
+  const label = document.getElementById(triggerId + "-label");
+  trigger.addEventListener('click', (e)=>{
+    e.stopPropagation();
+    const willOpen = panel.hidden;
+    document.querySelectorAll('.dropdown-panel').forEach(p=>p.hidden = true);
+    panel.hidden = !willOpen;
+  });
+  panel.addEventListener('click', e=>e.stopPropagation());
+  document.getElementById(clearId).addEventListener('click', ()=>{
+    picker.querySelectorAll('input[type=checkbox]').forEach(x=>x.checked=false);
+    state[stateKey] = new Set();
+    updateTriggerLabel(label, state[stateKey]);
+    reload();
+  });
+  document.getElementById(doneId).addEventListener('click', ()=>{ panel.hidden = true; });
+  return label;
+}
+document.addEventListener('click', ()=>{
+  document.querySelectorAll('.dropdown-panel').forEach(p=>p.hidden = true);
+});
+let _pickersBuilt = false;
+function renderFilterPickers(d){
+  if(_pickersBuilt) return;
+  const buyers = (d.filters && d.filters.available_buyers) || [];
+  const suppliers = (d.filters && d.filters.available_suppliers) || [];
+  if(!buyers.length && !suppliers.length) return;  // datos mock/vacios -- reintenta en el proximo render real
+  document.getElementById('buyer-panel').classList.add('dropdown-panel');
+  document.getElementById('supplier-panel').classList.add('dropdown-panel');
+  const buyerEl = document.getElementById('buyer-picker');
+  const supEl = document.getElementById('supplier-picker');
+  const buyerLabel = wireDropdownPicker({triggerId:'buyer-trigger', panelId:'buyer-panel', pickerId:'buyer-picker',
+    clearId:'buyer-clear', doneId:'buyer-done', datasetKey:'buyer', stateKey:'buyers'});
+  const supplierLabel = wireDropdownPicker({triggerId:'supplier-trigger', panelId:'supplier-panel', pickerId:'supplier-picker',
+    clearId:'supplier-clear', doneId:'supplier-done', datasetKey:'supplier2', stateKey:'suppliers'});
+  buildCheckboxList(buyerEl, buyers, 'buyer', ()=>{
+    state.buyers = new Set([...buyerEl.querySelectorAll('input:checked')].map(x=>x.dataset.buyer));
+    updateTriggerLabel(buyerLabel, state.buyers);
+    reload();
+  });
+  buildCheckboxList(supEl, suppliers, 'supplier2', ()=>{
+    state.suppliers = new Set([...supEl.querySelectorAll('input:checked')].map(x=>x.dataset.supplier2));
+    updateTriggerLabel(supplierLabel, state.suppliers);
+    reload();
+  });
+  _pickersBuilt = true;
+}
 const bind = (id,key)=>document.getElementById(id).addEventListener('change',e=>{
   state[key] = e.target.value; reload();
 });
@@ -987,13 +1070,16 @@ document.querySelectorAll('[data-alarm]').forEach(b=>b.addEventListener('click',
 }));
 
 document.getElementById('clear-slicers').addEventListener('click',()=>{
-  state.api="open_lab"; state.suppliers=new Set(["Digaygane","Lucid","Prime"]);
+  state.buyers=new Set(); state.suppliers=new Set();
   state.year=today.getFullYear(); state.months=new Set([today.getMonth()+1]);
   state.dayFrom=1; state.dayTo=today.getDate();
   state.type="all"; state.status="all";
   state.buyerFilter=null; window._supFilter=null;
-  document.querySelectorAll('[data-api]').forEach(x=>x.setAttribute('aria-pressed', x.dataset.api==="open_lab"?'true':'false'));
-  document.querySelectorAll('[data-supplier]').forEach(x=>x.setAttribute('aria-pressed','true'));
+  document.querySelectorAll('#buyer-picker input[type=checkbox]').forEach(x=>x.checked=false);
+  document.querySelectorAll('#supplier-picker input[type=checkbox]').forEach(x=>x.checked=false);
+  document.querySelectorAll('.dropdown-panel').forEach(p=>p.hidden = true);
+  const bl = document.getElementById('buyer-trigger-label'); if(bl) updateTriggerLabel(bl, state.buyers);
+  const sl = document.getElementById('supplier-trigger-label'); if(sl) updateTriggerLabel(sl, state.suppliers);
   syncDatePickerUI();
   document.getElementById('type-survey').value="all"; document.getElementById('status-report').value="all";
   reload();

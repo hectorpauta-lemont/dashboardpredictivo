@@ -1,4 +1,12 @@
-$root = "C:\eros-allocator"
+param([switch]$ManualStart)
+
+# Explicit opt-in: old Startup launchers must not restart the collectors.
+if (-not $ManualStart) {
+    Write-Output "Inicio automatico desactivado. Para iniciar manualmente: .\watchdog_pollers.ps1 -ManualStart"
+    exit 0
+}
+
+$root = $PSScriptRoot
 $logDir = "$root\deploy\logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $logFile = "$logDir\watchdog.log"
@@ -20,13 +28,14 @@ function Test-CommandRunning($needle) {
 
 function Start-Worker($cmdName) {
     try {
-        Start-Process cmd -ArgumentList "/c cd /d $root && venv\Scripts\python.exe manage.py $cmdName --hours 720" -WindowStyle Minimized -ErrorAction Stop
+        Start-Process -FilePath "$root\venv\Scripts\python.exe" -ArgumentList "manage.py $cmdName --hours 720" -WorkingDirectory $root -WindowStyle Hidden -ErrorAction Stop
     } catch {
         Write-Log "ERROR lanzando ${cmdName}: $_"
     }
 }
 
 $lastRollupDay = ""
+$lastResolveAt = Get-Date "2000-01-01"
 $tick = 0
 
 Write-Log "watchdog arrancado (PID $PID)"
@@ -52,7 +61,31 @@ try {
                 $out = & "$root\venv\Scripts\python.exe" manage.py build_dashboard_rollups --days 3 2>&1 | Out-String
                 Pop-Location
                 Write-Log ("rollup salida: " + ($out.Trim() -replace "`r?`n", " | "))
+
+                # sync de precio/tiempo por quota (survey_partner) -- aparte de
+                # los loops en vivo a proposito (pedido del usuario,
+                # 2026-09-21): no depende de que el proceso este arriba en el
+                # instante exacto en que una encuesta cambia de estado, se
+                # pone al dia solo una vez al dia y reintenta lo que falto.
+                Write-Log "corriendo sync_survey_partner_data --limit 300"
+                Push-Location $root
+                $out2 = & "$root\venv\Scripts\python.exe" manage.py sync_survey_partner_data --limit 300 2>&1 | Out-String
+                Pop-Location
+                Write-Log ("sync survey_partner salida: " + ($out2.Trim() -replace "`r?`n", " | "))
+
                 $lastRollupDay = $today
+            }
+
+            # reintento de allocations pendientes: cada 3 dias, no diario --
+            # pedido explicito del usuario (2026-09-21). Corrige encuestas
+            # donde Link ya resolvio el proveedor despues del poll original.
+            if (((Get-Date) - $lastResolveAt).TotalDays -ge 3) {
+                Write-Log "corriendo resolve_pending_allocations --days 30"
+                Push-Location $root
+                $out3 = & "$root\venv\Scripts\python.exe" manage.py resolve_pending_allocations --days 30 2>&1 | Out-String
+                Pop-Location
+                Write-Log ("resolve_pending_allocations salida: " + ($out3.Trim() -replace "`r?`n", " | "))
+                $lastResolveAt = Get-Date
             }
 
             $tick += 1

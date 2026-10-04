@@ -17,17 +17,31 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.utils import timezone
 
-from dashboard.metrics import _day_range
+from dashboard.metrics import PENDING_SUPPLIER_LABEL, _day_range
 from intake.models import LiveSurveySnapshot
 from orchestrator.models import DailyMetricRollup
 
 
-def _supplier(snap) -> str:
-    for alloc in (snap.raw_allocations or []):
-        n = alloc.get("client_supplier__name")
-        if n:
-            return n
-    return "—"
+def _supplier_shares(raw_allocations) -> dict:
+    """Fraccion de completes por proveedor segun raw_allocations (estadisticas
+    ya acumuladas por Link). Cuando una encuesta reparte completes entre mas
+    de un proveedor, se PRORRATEA -- no se le asigna todo al primero que
+    aparece (bug corregido 2026-09-18, ver dashboard/metrics._supplier_fraction
+    para el mismo criterio del lado del dashboard en vivo). Sin desglose:
+    todo va a '—' (sin proveedor identificado), nunca se adivina."""
+    total = 0
+    per_supplier: dict[str, int] = {}
+    for alloc in (raw_allocations or []):
+        name = alloc.get("client_supplier__name")
+        st = alloc.get("statistics") or {}
+        c = st.get("completes") or 0
+        if not name or c <= 0:
+            continue
+        per_supplier[name] = per_supplier.get(name, 0) + c
+        total += c
+    if total <= 0:
+        return {PENDING_SUPPLIER_LABEL: 1.0}
+    return {name: c / total for name, c in per_supplier.items()}
 
 
 class Command(BaseCommand):
@@ -70,28 +84,42 @@ class Command(BaseCommand):
             for sid, group in by_survey.items():
                 first, last = group[0], group[-1]
                 nc = max(last.completes - first.completes, 0)
-                key = (last.buyer_name or "—", _supplier(last))
-                a = agg[key]
-                a["surveys"].add(sid)
-                a["entrants"] += max(last.entrants_count - first.entrants_count, 0)
-                a["completed"] += nc
-                a["terminated"] += max(last.terms_count - first.terms_count, 0)
-                a["prescreens"] += max(last.prescreens_count - first.prescreens_count, 0)
-                a["revenue"] += nc * (last.cpi_client or 0)
-                a["cost"] += nc * (last.cpi or 0)
-                a["profit"] += nc * (last.profit_per_complete or 0)
-                if last.ir is not None:
-                    a["ir_sum"] += last.ir
-                    a["ir_n"] += 1
+                ne = max(last.entrants_count - first.entrants_count, 0)
+                nt = max(last.terms_count - first.terms_count, 0)
+                npre = max(last.prescreens_count - first.prescreens_count, 0)
+                buyer = last.buyer_name or "—"
+                shares = _supplier_shares(last.raw_allocations)
+                # IR es una tasa, no un volumen -- no se prorratea. Se guarda
+                # una sola vez por encuesta/dia (en el primer proveedor del
+                # reparto) para no contarla dos veces si la encuesta se divide
+                # entre varios proveedores ese dia.
+                ir_assigned = False
+                for sup, frac in shares.items():
+                    a = agg[(buyer, sup)]
+                    a["surveys"].add(sid)
+                    a["entrants"] += ne * frac
+                    a["completed"] += nc * frac
+                    a["terminated"] += nt * frac
+                    a["prescreens"] += npre * frac
+                    a["revenue"] += nc * frac * (last.cpi_client or 0)
+                    a["cost"] += nc * frac * (last.cpi or 0)
+                    a["profit"] += nc * frac * (last.profit_per_complete or 0)
+                    if last.ir is not None and not ir_assigned:
+                        a["ir_sum"] += last.ir
+                        a["ir_n"] += 1
+                        ir_assigned = True
 
             with transaction.atomic():
                 DailyMetricRollup.objects.filter(day=day).delete()
                 DailyMetricRollup.objects.bulk_create([
                     DailyMetricRollup(
+                        # entrants/completed/terminated/prescreens son enteros en el
+                        # modelo -- se redondean solo aca (al guardar), nunca antes,
+                        # para no acumular error de redondeo entre proveedores.
                         day=day, buyer_name=b, supplier_name=sup,
-                        surveys=len(a["surveys"]), entrants=a["entrants"],
-                        completed=a["completed"], terminated=a["terminated"],
-                        prescreens=a["prescreens"], revenue=round(a["revenue"], 2),
+                        surveys=len(a["surveys"]), entrants=round(a["entrants"]),
+                        completed=round(a["completed"]), terminated=round(a["terminated"]),
+                        prescreens=round(a["prescreens"]), revenue=round(a["revenue"], 2),
                         cost=round(a["cost"], 2), profit=round(a["profit"], 2),
                         ir_sum=round(a["ir_sum"], 2), ir_n=a["ir_n"],
                     )

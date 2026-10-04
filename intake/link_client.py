@@ -134,3 +134,72 @@ def get_allocations_for_survey(survey_supplier_id: str, jwt_token: str) -> list[
         raise LinkInternalApiError(200, str(data.get("errors")))
     results = data["data"]
     return results.get("results", results) if isinstance(results, dict) else results
+
+
+def extract_survey_partner_id(survey_supplier_detail: dict) -> str | None:
+    """Extrae el id de survey_partner desde un detalle de /surveysupplier/{id}/,
+    para pasarselo a get_survey_partner_detail() aparte. Compartido entre
+    run_allocator (encuestas AWARDED) y run_earnings_tracker (encuestas LIVE)
+    -- ver docstring de get_survey_partner_detail para el porque.
+
+    Dos formas de link distintas segun como este armado el precio (confirmado
+    2026-09-21, `type.name` en survey_partner_survey_supplier):
+      - SURVEY_PARTNER_SURVEY_SUPPLIER: precio parejo para toda la encuesta,
+        el id esta directo en survey_partner.id.
+      - SURVEY_PARTNER_QUOTA_SURVEY_SUPPLIER: precio por quota (segmento
+        demografico) -- survey_partner queda en null, el id real esta un
+        nivel mas adentro, en survey_partner_quota.survey_partner.id. Este
+        caso es justo el que trae cost_per_interview distinto por quota.
+
+    None si ninguna de las dos formas trae dato -- nunca se adivina."""
+    links = survey_supplier_detail.get("survey_partner_survey_supplier") or []
+    if not links:
+        return None
+    link = links[0]
+    direct = (link.get("survey_partner") or {}).get("id")
+    if direct:
+        return direct
+    return ((link.get("survey_partner_quota") or {}).get("survey_partner") or {}).get("id") or None
+
+
+def extract_survey_partner_quota_id(survey_supplier_detail: dict) -> int | None:
+    """Cuando el precio es por quota (ver extract_survey_partner_id), este es
+    el id de la quota EXACTA que le corresponde a este survey_supplier -- deja
+    ubicar su cost_per_interview preciso dentro de
+    raw_json_api.quotas[].quota_id, en vez de promediar entre todas las
+    quotas de la encuesta. None si el precio es parejo (sin quota puntual) o
+    si no hay link."""
+    links = survey_supplier_detail.get("survey_partner_survey_supplier") or []
+    if not links:
+        return None
+    return (links[0].get("survey_partner_quota") or {}).get("id") or None
+
+
+def get_survey_partner_detail(survey_partner_id: str, jwt_token: str) -> dict:
+    """
+    GET /api/v1/surveypartner/{id}/ -- requiere JWT (LINK_JWT_TOKEN), el token
+    de servicio da 401 (confirmado 2026-09-21, mismo patron que
+    get_allocations_for_survey). El campo `raw_json_api` de la respuesta trae
+    el desglose por QUOTA de la encuesta (segmento demografico): cada quota
+    tiene su propio `cost_per_interview` -- lo que se le cobra al CLIENTE por
+    esa quota puntual, no lo que se le paga al proveedor (eso sigue viniendo
+    de surveysupplier/raw_allocations) -- y sus propias metricas de duracion
+    (`length_of_interview`, `median_length_of_interview`).
+
+    El `survey_partner_id` para una encuesta dada sale de
+    AwardedSurvey.raw_survey_supplier["survey_partner_survey_supplier"][0]
+    ["survey_partner"]["id"] -- confirmado poblado en ~86% de las encuestas
+    (95/111 el 2026-09-21). Puede fallar con 401 si el JWT esta vacio/vencido:
+    el llamador debe capturar LinkInternalApiError y seguir sin este dato,
+    igual que get_allocations_for_survey -- nunca abortar la evaluacion.
+    """
+    if not jwt_token:
+        raise LinkInternalApiError(401, "LINK_JWT_TOKEN no configurado")
+    url = f"{settings.LINK_API_BASE_URL}/surveypartner/{survey_partner_id}/"
+    response = requests.get(url, headers=_jwt_headers(jwt_token), timeout=15)
+    if not response.ok:
+        raise LinkInternalApiError(response.status_code, response.text)
+    data = response.json()
+    if not data.get("success"):
+        raise LinkInternalApiError(200, str(data.get("errors")))
+    return data["data"]

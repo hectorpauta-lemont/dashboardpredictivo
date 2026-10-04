@@ -39,6 +39,15 @@ class AwardedSurvey(models.Model):
     raw_survey_supplier = models.JSONField(default=dict)
     raw_allocations = models.JSONField(default=list)
 
+    # Detalle de /surveypartner/{id}/ (requiere JWT, ver intake/link_client.py:
+    # get_survey_partner_detail). El id sale de
+    # raw_survey_supplier["survey_partner_survey_supplier"][0]["survey_partner"]["id"]
+    # -- poblado en ~86% de las encuestas (confirmado 2026-09-21). Vacio {} si
+    # el link no existe todavia o el JWT esta vencido -- nunca bloquea el poll.
+    # raw_json_api.quotas[] trae cost_per_interview y length_of_interview POR
+    # QUOTA (segmento demografico), mas fino que el cpi_client a nivel encuesta.
+    raw_survey_partner = models.JSONField(default=dict)
+
     first_seen_at = models.DateTimeField(auto_now_add=True)
     last_polled_at = models.DateTimeField(auto_now=True)
 
@@ -78,12 +87,28 @@ class LiveSurveySnapshot(models.Model):
     prescreens_count = models.PositiveIntegerField(default=0)
     terms_count = models.PositiveIntegerField(default=0)
 
+    # LOI (minutos) -- con esto se paga/cobra la encuesta. "loi" es el REAL
+    # medido por Link desde que entra el panelista hasta que completa (viene
+    # en la fila de la lista LIVE; el "loi" del detalle siempre llega en 0).
+    # "expected_loi" es el prometido por el cliente (del detalle). loi=None
+    # mientras la encuesta no tenga completes (Link manda 0 en ese caso).
+    loi = models.PositiveIntegerField(null=True, blank=True)
+    expected_loi = models.PositiveIntegerField(null=True, blank=True)
+
     # Igual que AwardedSurvey.raw_allocations -- resultado crudo de
     # get_allocations_for_survey (requiere LINK_JWT_TOKEN, ver
     # intake/link_client.py). Solo el ranking de "mejores suppliers" lo usa,
     # y solo con el snapshot MAS RECIENTE por encuesta (las stats de Link ya
     # vienen acumuladas, no hay que sumar entre snapshots).
     raw_allocations = models.JSONField(default=list)
+
+    # Detalle de /surveypartner/{id}/ (requiere JWT) -- trae cost_per_interview
+    # e length_of_interview POR QUOTA, mas closed_at (cuando de verdad cierra
+    # la encuesta). NO se re-pide en cada poll: run_earnings_tracker solo lo
+    # busca de nuevo si el ultimo snapshot guardado todavia no tiene
+    # closed_at -- una vez que cierra, ya no cambia, no vale la pena volver a
+    # llamar a Link por lo mismo. Vacio {} = todavia no se pudo obtener.
+    raw_survey_partner = models.JSONField(default=dict)
 
     polled_at = models.DateTimeField(auto_now_add=True, db_index=True)
 

@@ -8,7 +8,6 @@ Uso:
 """
 
 import logging
-import threading
 import time
 from datetime import timedelta
 
@@ -19,13 +18,14 @@ from django.utils import timezone
 
 from intake.link_client import (
     LinkInternalApiError,
+    extract_survey_partner_id,
     get_allocations_for_survey,
     get_live_survey_suppliers,
+    get_survey_partner_detail,
     get_survey_supplier_detail,
 )
 from intake.models import LiveSurveySnapshot
 from orchestrator.models import AllocatorRuntimeState, PerformanceAlarm
-from orchestrator.notifications import notify_performance_alarm
 from rules_engine.checks import calculate_profit_per_complete, check_ir_alarm, check_termination_alarm
 
 logger = logging.getLogger(__name__)
@@ -167,6 +167,8 @@ class Command(BaseCommand):
             # suppliers se queda sin este dato puntual.
             allocations = []
 
+        survey_partner = self._survey_partner_if_needed(survey_supplier_id, detail)
+
         snapshot = LiveSurveySnapshot(
             survey_supplier_id=survey_supplier_id,
             survey_name=survey_name,
@@ -182,7 +184,10 @@ class Command(BaseCommand):
             entrants_count=row.get("entrants_count") or 0,
             prescreens_count=prescreens_count,
             terms_count=terms_count,
+            loi=row.get("loi") or None,
+            expected_loi=detail.get("expected_loi") or None,
             raw_allocations=allocations,
+            raw_survey_partner=survey_partner,
         )
         self.stdout.write(
             f"{survey_name}: {row.get('qty_progress_completes')}/{row.get('qty_progress_quota')} "
@@ -200,6 +205,33 @@ class Command(BaseCommand):
             PerformanceAlarm.AlarmType.TERMINATION_HIGH, check_termination_alarm(terms_count, prescreens_count),
         )
         return snapshot
+
+    def _survey_partner_if_needed(self, survey_supplier_id: str, detail: dict) -> dict:
+        """Solo vuelve a pedir /surveypartner/{id}/ si el ultimo snapshot
+        guardado de esta encuesta todavia NO tiene closed_at -- una vez que
+        Link marca la encuesta cerrada, ese detalle ya no cambia, y volver a
+        pedirlo en cada poll (cada 5 min, ~145 encuestas activas) desperdicia
+        llamadas y duplica el mismo JSON en cada fila de LiveSurveySnapshot
+        sin necesidad. Si no hay snapshot previo, se pide (primera vez que se
+        ve esta encuesta)."""
+        last = (
+            LiveSurveySnapshot.objects
+            .filter(survey_supplier_id=survey_supplier_id)
+            .exclude(raw_survey_partner={})
+            .order_by("-polled_at")
+            .only("raw_survey_partner")
+            .first()
+        )
+        if last and last.raw_survey_partner.get("closed_at"):
+            return last.raw_survey_partner  # ya cerro -- se conserva el mismo dato, no se vuelve a pedir
+
+        partner_id = extract_survey_partner_id(detail)
+        if not partner_id:
+            return last.raw_survey_partner if last else {}
+        try:
+            return get_survey_partner_detail(partner_id, settings.LINK_JWT_TOKEN)
+        except LinkInternalApiError:
+            return last.raw_survey_partner if last else {}
 
     def _check_alarm(self, survey_supplier_id, survey_name, buyer_name, alarm_type, result) -> None:
         """
@@ -230,17 +262,10 @@ class Command(BaseCommand):
             threshold=result.threshold,
         )
         self.stdout.write(self.style.WARNING(f"ALARMA {alarm.get_alarm_type_display()} -- {survey_name}: {result.reason}"))
-        # En thread aparte -- email/Telegram pueden tardar y no deben frenar
-        # el loop principal de sondeo (mismo criterio que
-        # notify_zamplia_blocked en eros-prime-gate).
-        threading.Thread(target=self._notify_and_record, args=(alarm,), daemon=True).start()
-
-    def _notify_and_record(self, alarm: PerformanceAlarm) -> None:
-        results = notify_performance_alarm(alarm)
-        PerformanceAlarm.objects.filter(pk=alarm.pk).update(
-            notified_email=results.get("email", "not_attempted"),
-            notified_telegram=results.get("telegram", "not_attempted"),
-        )
+        # Sin email ni Telegram (pedido del usuario, 2026-09-24): con mas
+        # demanda serian interminables. La alarma solo se ve en el panel
+        # "Performance alarms" del dashboard. notify_performance_alarm queda
+        # en orchestrator/notifications.py por si se quiere reactivar.
 
     def _update_runtime_state(self, **fields) -> None:
         try:

@@ -1,4 +1,7 @@
+from datetime import timedelta
+
 from django.test import TestCase, override_settings
+from django.utils import timezone
 
 from audit.models import DecisionLog
 from intake.models import AwardedSurvey
@@ -14,6 +17,7 @@ class DecisionApiTests(TestCase):
             type_industry_name="Consumer Electronics",
             cpi=1.0,
             cpi_client=2.0,
+            survey_created_at=timezone.now(),
         )
         self.old_decision = DecisionLog.objects.create(
             survey=self.survey,
@@ -53,3 +57,11 @@ class DecisionApiTests(TestCase):
         response = self.client.get("/api/decisions/s-1/", HTTP_X_API_KEY="test-key")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.json()["decisions"]), 2)
+
+    def test_old_surveys_require_show_all(self):
+        self.survey.survey_created_at = timezone.now() - timedelta(days=31)
+        self.survey.save(update_fields=["survey_created_at"])
+        response = self.client.get("/api/decisions/", HTTP_X_API_KEY="test-key")
+        self.assertEqual(response.json()["results"], [])
+        response = self.client.get("/api/decisions/?show_all=true", HTTP_X_API_KEY="test-key")
+        self.assertEqual(len(response.json()["results"]), 1)

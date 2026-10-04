@@ -18,6 +18,8 @@ from datetime import datetime as datetime_cls
 from datetime import time as time_cls
 from datetime import timedelta
 
+from django.core.cache import cache
+from django.db.models import Max
 from django.utils import timezone
 
 from audit.models import DecisionLog
@@ -31,6 +33,15 @@ LIVE_TAIL_DAYS = 2
 # Pedido explicito de Piyush (2026-08-26): "Test client" (y variantes) queda
 # fuera de TODA vista -- mismo criterio que mock_ui.views.exclude_test_buyers.
 TEST_BUYER = "Test client"
+
+# Cuando Link todavia no habia resuelto el proveedor de una transaccion al
+# momento en que la pollemos (confirmado con el usuario 2026-09-21: SI tienen
+# proveedor real en Link, solo que raw_allocations todavia venia vacio cuando
+# lo leimos -- se resuelve mas tarde). Nunca significa "sin proveedor para
+# siempre" -- por eso el nombre explica la causa real, no un guion suelto que
+# la gente confundia con un total. orchestrator.resolve_pending_allocations
+# vuelve a intentar estas mismas encuestas mas adelante y las corrige.
+PENDING_SUPPLIER_LABEL = "Pendiente de resolver (Link aún no lo tenía al momento del poll)"
 
 # -- verdicts (audit.DecisionLog.Verdict) --------------------------------------
 V_ELIGIBLE = "eligible_needs_cpi_input"
@@ -80,6 +91,29 @@ def _day_range(date_from: date_cls, date_to: date_cls):
     return start, end
 
 
+def _supplier_fraction(raw_allocations, suppliers: set[str]):
+    """Fraccion [0,1] de los completes de una encuesta que corresponden a
+    `suppliers`, segun las estadisticas acumuladas de Link en raw_allocations
+    (statistics.completes por proveedor, ya acumulado por Link -- no hay que
+    sumar entre snapshots). None si no hay allocations desglosadas: la
+    encuesta se EXCLUYE del filtro de proveedor en ese caso, nunca se le
+    asigna una fraccion adivinada."""
+    if not raw_allocations:
+        return None
+    total = selected = 0
+    for alloc in raw_allocations:
+        st = alloc.get("statistics") or {}
+        c = st.get("completes") or 0
+        if c <= 0:
+            continue
+        total += c
+        if alloc.get("client_supplier__name") in suppliers:
+            selected += c
+    if total <= 0:
+        return None
+    return selected / total
+
+
 def _iso_or_none(value):
     try:
         return date_cls.fromisoformat(str(value).strip())
@@ -124,35 +158,57 @@ _DELTA_FIELDS = (
 _LATEST_FIELDS = _DELTA_FIELDS + ("survey_name", "perc_conversion", "quota", "raw_allocations")
 
 
-def _daily_deltas(date_from, date_to):
+def _daily_deltas(date_from, date_to, buyers: set[str] | None = None, suppliers: set[str] | None = None):
     """Recorre snapshots del rango y arma, dia por dia y por encuesta,
     (ultimo del dia - primero del dia). Devuelve estructuras reutilizadas por
-    varias secciones del dashboard."""
+    varias secciones del dashboard.
+
+    `buyers`: filtra encuestas por buyer_name exacto (campo directo, sin
+    ambiguedad). `suppliers`: cuando una encuesta reparte completes entre
+    mas de un proveedor (raw_allocations), PRORRATEA cada delta por la
+    fraccion de completes que corresponde a `suppliers` ese dia -- una
+    encuesta sin desglose por proveedor se EXCLUYE del todo bajo este
+    filtro, nunca se le asigna una fraccion adivinada."""
     start_dt, end_dt = _day_range(date_from, date_to)
-    snapshots = (
+    qs = (
         LiveSurveySnapshot.objects
         .filter(polled_at__gte=start_dt, polled_at__lt=end_dt)
         .exclude(buyer_name__iexact=TEST_BUYER)
-        .only(*_DELTA_FIELDS)
-        .order_by("polled_at")
-        .iterator(chunk_size=4000)
     )
+    if buyers:
+        qs = qs.filter(buyer_name__in=buyers)
+    snapshots = qs.only(*_DELTA_FIELDS).order_by("polled_at").iterator(chunk_size=4000)
 
     by_survey_day: dict[tuple, list] = {}
     by_survey_all: dict[str, list] = {}
     polled_days: set = set()
     latest_pk_by_survey: dict[str, int] = {}
+    last_pk_by_survey_day: dict[tuple, int] = {}
     for snap in snapshots:
         day = timezone.localtime(snap.polled_at).date()
         polled_days.add(day)
         by_survey_day.setdefault((snap.survey_supplier_id, day), []).append(snap)
         by_survey_all.setdefault(snap.survey_supplier_id, []).append(snap)
         latest_pk_by_survey[snap.survey_supplier_id] = snap.pk  # scan ordenado asc
+        last_pk_by_survey_day[(snap.survey_supplier_id, day)] = snap.pk
+
+    # Filtro de proveedor: traer raw_allocations SOLO del ultimo snapshot de
+    # cada (encuesta, dia) -- lo minimo necesario para prorratear, en vez de
+    # cargar raw_allocations (pesado) en el scan completo de arriba.
+    alloc_by_pk: dict[int, list] = {}
+    if suppliers:
+        for row in (
+            LiveSurveySnapshot.objects
+            .filter(pk__in=list(last_pk_by_survey_day.values()))
+            .only("pk", "raw_allocations")
+        ):
+            alloc_by_pk[row.pk] = row.raw_allocations
 
     revenue = cost = profit = 0.0
     completes_new = terms_new = entrants_new = prescreens_new = 0
     by_day: dict[date_cls, dict] = {}
     ir_by_buyer_day: dict[str, dict] = {}
+    sids_matching_supplier: set[str] = set()
 
     for (sid, day), snaps in by_survey_day.items():
         first, latest = snaps[0], snaps[-1]
@@ -160,6 +216,18 @@ def _daily_deltas(date_from, date_to):
         nt = max(latest.terms_count - first.terms_count, 0)
         ne = max(latest.entrants_count - first.entrants_count, 0)
         npre = max(latest.prescreens_count - first.prescreens_count, 0)
+
+        frac = 1.0
+        if suppliers:
+            alloc = alloc_by_pk.get(last_pk_by_survey_day[(sid, day)])
+            f = _supplier_fraction(alloc, suppliers)
+            if f is None:
+                continue  # sin desglose por proveedor -- se excluye, no se adivina
+            frac = f
+            if frac > 0:
+                sids_matching_supplier.add(sid)
+
+        nc, nt, ne, npre = nc * frac, nt * frac, ne * frac, npre * frac
         d_rev = nc * (latest.cpi_client or 0)
         d_cost = nc * (latest.cpi or 0)
         d_prof = nc * (latest.profit_per_complete or 0)
@@ -177,16 +245,24 @@ def _daily_deltas(date_from, date_to):
         row["transactions"] += ne
         row["revenue"] += d_rev
         row["cost"] += d_cost
-        if latest.ir is not None:
+        if latest.ir is not None and frac > 0:
             row["ir_vals"].append(latest.ir)
             ir_by_buyer_day.setdefault(latest.buyer_name or "—", {}).setdefault(day, []).append(latest.ir)
 
     # Ultimo snapshot de cada encuesta con los campos "pesados" -- ~200 filas.
+    # Con filtro de proveedor, se acota a las encuestas donde ese proveedor
+    # de verdad tuvo completes en el rango (sids_matching_supplier).
+    survey_ids_for_state = (
+        {sid: pk for sid, pk in latest_pk_by_survey.items() if sid in sids_matching_supplier}
+        if suppliers else latest_pk_by_survey
+    )
     latest_per_survey = list(
         LiveSurveySnapshot.objects
-        .filter(pk__in=list(latest_pk_by_survey.values()))
+        .filter(pk__in=list(survey_ids_for_state.values()))
         .only(*_LATEST_FIELDS)
     )
+    if suppliers:
+        by_survey_all = {sid: v for sid, v in by_survey_all.items() if sid in sids_matching_supplier}
     return {
         "revenue": revenue, "cost": cost, "profit": profit,
         "completes_new": completes_new, "terms_new": terms_new,
@@ -272,7 +348,7 @@ def _pct_delta(cur, prev):
     return round((cur - prev) / abs(prev) * 100, 1)
 
 
-def _window_aggregate(date_from, date_to):
+def _window_aggregate(date_from, date_to, buyers: set[str] | None = None, suppliers: set[str] | None = None):
     """Igual shape que _daily_deltas, pero para ventanas largas: lee
     DailyMetricRollup (rapido) para el historico y escanea LiveSurveySnapshot
     en vivo solo los ultimos LIVE_TAIL_DAYS (fresco). Los <= LIVE_TAIL_DAYS
@@ -280,7 +356,7 @@ def _window_aggregate(date_from, date_to):
     today = timezone.localtime(timezone.now()).date()
     tail_start = max(date_from, today - timedelta(days=LIVE_TAIL_DAYS))
 
-    live = _daily_deltas(tail_start, date_to)
+    live = _daily_deltas(tail_start, date_to, buyers=buyers, suppliers=suppliers)
     by_day = dict(live["by_day"])
     ir_by_buyer_day = {b: dict(d) for b, d in live["ir_by_buyer_day"].items()}
     revenue = live["revenue"]; cost = live["cost"]; profit = live["profit"]
@@ -288,11 +364,23 @@ def _window_aggregate(date_from, date_to):
     entrants_new = live["entrants_new"]; prescreens_new = live["prescreens_new"]
     supplier_acc: dict[str, dict] = {}
 
+    # surveys_hist: aproximacion -- suma 'surveys activas ese dia' del rollup.
+    # Una encuesta abierta varios dias del rango se cuenta una vez por dia (no
+    # hay IDs de encuesta guardados en el rollup, solo el conteo diario), asi
+    # que esto sobre-cuenta encuestas de larga duracion -- mejor que mostrar 0,
+    # documentado en "notes" de la respuesta.
+    surveys_hist = 0
     hist_to = min(date_to, tail_start - timedelta(days=1))
     if hist_to >= date_from:
-        for r in DailyMetricRollup.objects.filter(
+        rollup_qs = DailyMetricRollup.objects.filter(
             day__gte=date_from, day__lte=hist_to
-        ).exclude(buyer_name__iexact=TEST_BUYER):
+        ).exclude(buyer_name__iexact=TEST_BUYER)
+        if buyers:
+            rollup_qs = rollup_qs.filter(buyer_name__in=buyers)
+        if suppliers:
+            rollup_qs = rollup_qs.filter(supplier_name__in=suppliers)
+        for r in rollup_qs:
+            surveys_hist += r.surveys
             revenue += r.revenue; cost += r.cost; profit += r.profit
             completes_new += r.completed; terms_new += r.terminated
             entrants_new += r.entrants; prescreens_new += r.prescreens
@@ -307,13 +395,17 @@ def _window_aggregate(date_from, date_to):
                 row["ir_vals"].append(r.ir_sum / r.ir_n)
                 bd = ir_by_buyer_day.setdefault(r.buyer_name or "—", {})
                 bd.setdefault(r.day, []).append(r.ir_sum / r.ir_n)
-            sup = supplier_acc.setdefault(r.supplier_name or "—",
-                                          {"name": r.supplier_name or "—", "entrants": 0, "completes": 0, "cpi": []})
+            sup_name = r.supplier_name or PENDING_SUPPLIER_LABEL
+            sup = supplier_acc.setdefault(sup_name, {"name": sup_name, "entrants": 0, "completes": 0, "cpi": []})
             sup["entrants"] += r.entrants
             sup["completes"] += r.completed
 
-    # supplier_rows: rollup historico + breakdown en vivo del tail (raw_allocations)
-    live_sup = {r["name"]: r for r in _supplier_breakdown(live["latest_per_survey"])}
+    # supplier_rows: rollup historico + breakdown en vivo del tail (raw_allocations).
+    # awarded_alloc=[] a proposito -- sin esto, _supplier_breakdown() suma por
+    # defecto TODO AwardedSurvey.raw_allocations sin importar el rango pedido
+    # (bug encontrado 2026-09-18: contaminaba by_supplier/supplier_ranking con
+    # el historico completo de encuestas AWARDED, no solo el LIVE del tail).
+    live_sup = {r["name"]: r for r in _supplier_breakdown(live["latest_per_survey"], awarded_alloc=[])}
     for name, r in live_sup.items():
         acc = supplier_acc.setdefault(name, {"name": name, "entrants": 0, "completes": 0, "cpi": []})
         acc["entrants"] += r["transactions"]; acc["completes"] += r["completes"]
@@ -334,44 +426,58 @@ def _window_aggregate(date_from, date_to):
         "by_day": by_day, "ir_by_buyer_day": ir_by_buyer_day,
         "latest_per_survey": live["latest_per_survey"],
         "by_survey_all": live["by_survey_all"], "polled_days": set(by_day),
-        "supplier_rows": supplier_rows,
+        "supplier_rows": supplier_rows, "surveys_hist": surveys_hist,
     }
 
 
 # ---------------------------------------------------------------------------
 # entrada publica 1 -- /api/dashboard-metrics
 # ---------------------------------------------------------------------------
+def _csv_set(value) -> set[str]:
+    return {v.strip() for v in str(value or "").split(",") if v.strip()}
+
+
 def build_dashboard_metrics(request_params) -> dict:
     date_from, date_to = _period_bounds(request_params)
     span = (date_to - date_from).days + 1
     prev_from = date_from - timedelta(days=span)
     prev_to = date_from - timedelta(days=1)
 
-    agg = _window_aggregate(date_from, date_to)
+    buyers = _csv_set(request_params.get("buyers"))
+    suppliers = _csv_set(request_params.get("suppliers"))
+
+    agg = _window_aggregate(date_from, date_to, buyers=buyers or None, suppliers=suppliers or None)
     lps = agg["latest_per_survey"]
     fin = _financials(agg)
 
     # Deltas vs. la ventana anterior de igual largo -- barato: sale del rollup.
+    # Mismos filtros de buyer/supplier que el periodo actual, para que el %
+    # de cambio compare manzanas con manzanas.
     prev = DailyMetricRollup.objects.filter(day__gte=prev_from, day__lte=prev_to)
+    if buyers:
+        prev = prev.filter(buyer_name__in=buyers)
+    if suppliers:
+        prev = prev.filter(supplier_name__in=suppliers)
     prev_rev = sum(r.revenue for r in prev) if prev.exists() else None
-    prev_cost = None
-    if prev_rev is not None:
-        prev_cost = sum(r.cost for r in DailyMetricRollup.objects.filter(day__gte=prev_from, day__lte=prev_to))
+    prev_cost = sum(r.cost for r in prev) if prev_rev is not None else None
     prev_fin = {"revenue": prev_rev, "cost": prev_cost, "conv_rate": None}
 
     # ---- totales / summary table ----
     # Todo el bloque de VOLUMEN y PLATA es "actividad del periodo" (delta entre
     # el primer y el ultimo snapshot de cada dia), consistente con revenue/cost.
     # Las TASAS promedio (ir, conversion) y los CONTEOS (surveys, alarmas) son
-    # estado actual -- no son magnitudes acumulables.
+    # estado actual -- no son magnitudes acumulables. Con filtro de proveedor
+    # los conteos quedan prorrateados (no enteros) -- se redondean solo aca,
+    # al mostrarlos, para no acumular error de redondeo en la suma.
     total_transactions = agg["entrants_new"]
     total_completed = agg["completes_new"]
     total_terms = agg["terms_new"]
     total_prescreens = agg["prescreens_new"]
+    total_surveys = len(agg["by_survey_all"]) + agg["surveys_hist"]
     totals = {
-        "surveys": len(agg["by_survey_all"]),
-        "transactions": total_transactions,
-        "completed": total_completed,
+        "surveys": total_surveys,
+        "transactions": round(total_transactions),
+        "completed": round(total_completed),
         "conv_rate": round(total_completed / total_transactions * 100, 2) if total_transactions else None,
         "cost": fin["cost"],
         "revenue": fin["revenue"],
@@ -400,8 +506,8 @@ def build_dashboard_metrics(request_params) -> dict:
         summary_rows.append({
             "year": r["year"], "month": r["month"],
             "surveys": len(r["surveys"]),
-            "transactions": r["transactions"],
-            "completed": r["completed"],
+            "transactions": round(r["transactions"]),
+            "completed": round(r["completed"]),
             "conv_rate": round(r["completed"] / r["transactions"] * 100, 2) if r["transactions"] else None,
             "cost": round(r["cost"], 2),
             "revenue": round(r["revenue"], 2),
@@ -460,7 +566,25 @@ def build_dashboard_metrics(request_params) -> dict:
     # rango pedido -- NO usar _supplier_breakdown(lps) aca: por defecto esa
     # funcion suma TODO AwardedSurvey.raw_allocations sin importar la fecha
     # (pensado para "ultimo estado conocido", no para un reporte por periodo).
-    supplier_rows = agg["supplier_rows"]
+    #
+    # Las filas "pendientes de resolver" (Link no habia asignado el proveedor
+    # todavia al momento del poll -- SI tienen proveedor real, confirmado con
+    # el usuario 2026-09-21) se separan del breakdown principal: no compiten
+    # como si fueran un proveedor mas en el donut/ranking. Quedan aparte en
+    # "pending_supplier", y orchestrator.resolve_pending_allocations las
+    # vuelve a intentar cada 3 dias para corregirlas cuando Link ya las tenga.
+    # "—" (etiqueta vieja, antes del 2026-09-21) se trata igual que
+    # PENDING_SUPPLIER_LABEL a proposito -- dias historicos del rollup que
+    # todavia no se reconstruyeron con la etiqueta nueva no deben colarse en
+    # el donut como si fueran un proveedor real llamado "—".
+    _PENDING_NAMES = {PENDING_SUPPLIER_LABEL, "—"}
+    all_supplier_rows = agg["supplier_rows"]
+    supplier_rows = [r for r in all_supplier_rows if r["name"] not in _PENDING_NAMES]
+    pending_rows = [r for r in all_supplier_rows if r["name"] in _PENDING_NAMES]
+    pending_supplier = {
+        "transactions": sum(r["transactions"] for r in pending_rows),
+        "completes": sum(r["completes"] for r in pending_rows),
+    }
     sup_total = sum(r["transactions"] for r in supplier_rows) or 1
     by_supplier = [
         {"name": r["name"], "transactions": r["transactions"],
@@ -470,15 +594,15 @@ def build_dashboard_metrics(request_params) -> dict:
     overquota = max(0, total_transactions - total_completed - total_terms - total_prescreens)
     st_total = (total_completed + total_terms + overquota) or 1
     by_status = [
-        {"name": "Completed", "transactions": total_completed, "pct": round(total_completed / st_total * 100, 1)},
-        {"name": "Terminated", "transactions": total_terms, "pct": round(total_terms / st_total * 100, 1)},
-        {"name": "Overquota", "transactions": overquota, "pct": round(overquota / st_total * 100, 1)},
+        {"name": "Completed", "transactions": round(total_completed), "pct": round(total_completed / st_total * 100, 1)},
+        {"name": "Terminated", "transactions": round(total_terms), "pct": round(total_terms / st_total * 100, 1)},
+        {"name": "Overquota", "transactions": round(overquota), "pct": round(overquota / st_total * 100, 1)},
     ]
 
     # ---- charts por dia ----
     status_by_day = [
-        {"day": _fmt_day(d.isoformat()), "completed": r["completed"],
-         "overquota": 0, "terminate": r["terminate"]}
+        {"day": _fmt_day(d.isoformat()), "completed": round(r["completed"]),
+         "overquota": 0, "terminate": round(r["terminate"])}
         for d, r in ir_days
     ]
     revenue_by_day = [
@@ -487,6 +611,19 @@ def build_dashboard_metrics(request_params) -> dict:
     ]
 
     # ---- external survey name (tambien alimenta el drill-down por buyer) ----
+    # Ultimo snapshot de cada encuesta DENTRO del rango pedido (2026-09-24).
+    # Antes usaba lps, que solo cubre los ultimos LIVE_TAIL_DAYS -> un rango
+    # historico (ej. 5-17) dejaba esta tabla vacia.
+    range_start, range_end = _day_range(date_from, date_to)
+    range_latest_ids = (
+        LiveSurveySnapshot.objects.filter(polled_at__gte=range_start, polled_at__lt=range_end)
+        .order_by().values("survey_supplier_id").annotate(m=Max("id")).values_list("m", flat=True)
+    )
+    range_latest = LiveSurveySnapshot.objects.filter(pk__in=list(range_latest_ids)).defer("raw_survey_partner")
+    if buyers:
+        range_latest = range_latest.filter(buyer_name__in=buyers)
+    range_latest = [s for s in range_latest.exclude(buyer_name__iexact=TEST_BUYER)
+                    if not suppliers or _first_supplier(s) in suppliers]
     external = sorted(
         ({
             "name": s.survey_name or s.survey_supplier_id,
@@ -501,7 +638,11 @@ def build_dashboard_metrics(request_params) -> dict:
                 round(s.terms_count / s.entrants_count * 100, 1)
                 if s.entrants_count else None
             ),
-        } for s in lps),
+            # mismo KPI que la columna "Var (LOI)" del panel de alarmas
+            "loi": s.loi,
+            "expected_loi": s.expected_loi,
+            "loi_var": (s.loi - s.expected_loi) if s.loi is not None and s.expected_loi is not None else None,
+        } for s in range_latest),
         key=lambda r: r["completed"], reverse=True,
     )[:200]
 
@@ -538,29 +679,52 @@ def build_dashboard_metrics(request_params) -> dict:
         })
 
     # ---- alarmas activas (IR bajo / terminacion alta) -- vistas del panel ----
-    now = timezone.now()
-    alarms = [
-        {
+    # Cada fila lleva el LOI real vs prometido de la encuesta (ultimo snapshot
+    # con LOI medido) -- reemplaza la columna "Age" (pedido del usuario,
+    # 2026-09-24): el negocio paga/cobra por minuto de entrevista.
+    active_alarms = list(
+        PerformanceAlarm.objects.filter(is_active=True)
+        .exclude(buyer_name__iexact=TEST_BUYER).order_by("-triggered_at")[:60]
+    )
+    # Una sola consulta (no subquery por fila: tardaba ~3.6s en sqlite).
+    loi_by_survey: dict[str, tuple] = {}
+    for sid, loi, expected in (
+        LiveSurveySnapshot.objects
+        .filter(survey_supplier_id__in={a.survey_supplier_id for a in active_alarms}, loi__isnull=False)
+        .order_by("survey_supplier_id", "-polled_at")
+        .values_list("survey_supplier_id", "loi", "expected_loi")
+    ):
+        loi_by_survey.setdefault(sid, (loi, expected))
+    alarms = []
+    for a in active_alarms:
+        loi, expected = loi_by_survey.get(a.survey_supplier_id, (None, None))
+        alarms.append({
             "survey_name": a.survey_name or a.survey_supplier_id,
             "buyer": a.buyer_name or "—",
             "type": "ir_low" if a.alarm_type == PerformanceAlarm.AlarmType.IR_LOW else "termination_high",
             "value": round(a.value_at_trigger, 1) if a.value_at_trigger is not None else None,
             "threshold": round(a.threshold, 1),
             "triggered_at": a.triggered_at.isoformat(),
-            "age_hours": round((now - a.triggered_at).total_seconds() / 3600, 1),
-        }
-        for a in PerformanceAlarm.objects.filter(is_active=True)
-        .exclude(buyer_name__iexact=TEST_BUYER).order_by("-triggered_at")[:60]
-    ]
+            "loi": loi,
+            "expected_loi": expected,
+            "loi_var": (loi - expected) if loi is not None and expected is not None else None,
+        })
 
     last_update = (
         max((s.polled_at for s in lps), default=None)
         or timezone.now()
     )
+    available_buyers, available_suppliers = _available_buyers_and_suppliers()
 
     return {
         "last_update": last_update.isoformat(),
         "period": {"date_from": date_from.isoformat(), "date_to": date_to.isoformat()},
+        "filters": {
+            "available_buyers": available_buyers,
+            "available_suppliers": available_suppliers,
+            "selected_buyers": sorted(buyers),
+            "selected_suppliers": sorted(suppliers),
+        },
         "totals": totals,
         "summary_rows": summary_rows,
         "kpis": {
@@ -574,6 +738,7 @@ def build_dashboard_metrics(request_params) -> dict:
             "statistical": statistical,
         },
         "by_supplier": by_supplier,
+        "pending_supplier": pending_supplier,
         "by_status": by_status,
         "status_by_day": status_by_day,
         "ir_trend": ir_trend,
@@ -587,8 +752,78 @@ def build_dashboard_metrics(request_params) -> dict:
             "cost": "CPI unicamente -- el dato de 'fee' todavia no se trae de Link.",
             "auto_safe_candidates": "Heuristica; umbral 'auto-safe' formal pendiente con Piyush.",
             "by_supplier": None if by_supplier else "Sin raw_allocations (LINK_JWT_TOKEN vacio/vencido o sin re-poll).",
+            "pending_supplier": (
+                f"{pending_supplier['transactions']:,} transacciones SI tienen proveedor real en "
+                "Link, pero todavia no se pudieron identificar porque Link no habia terminado de "
+                "asignarlo al momento del poll -- quedan fuera de 'by_supplier'/'supplier_ranking' "
+                "a proposito, no compiten como si fueran un proveedor mas. "
+                "orchestrator.resolve_pending_allocations las vuelve a intentar cada 3 dias."
+            ) if pending_supplier["transactions"] else None,
+            "surveys": (
+                "Fuera de los ultimos 2 dias, es una suma de 'encuestas activas por dia' del "
+                "rollup -- una encuesta abierta varios dias del rango se cuenta una vez por "
+                "cada dia, no es un conteo de encuestas unicas del periodo completo."
+            ),
+            "suppliers_filter": (
+                "Cuando una encuesta reparte completes entre mas de un proveedor, el filtro de "
+                "proveedor prorratea revenue/costo/completes segun la fraccion real de cada uno "
+                "(estadisticas de Link) -- una encuesta sin ese desglose se excluye del todo, "
+                "nunca se le asigna una fraccion adivinada."
+            ) if suppliers else None,
         },
     }
+
+
+_FILTER_OPTIONS_CACHE_KEY = "dashboard:filter_options:v1"
+
+
+def _available_buyers_and_suppliers():
+    """Listas globales (no acotadas por el rango/filtro pedido) para poblar
+    los checklists del dashboard -- siempre las mismas opciones disponibles,
+    sin importar que ya este filtrado. Proveedores: sale de DailyMetricRollup
+    (rapido, ya normalizado) mas un escaneo acotado de los snapshots LIVE mas
+    recientes, por si hay un proveedor nuevo que el rollup todavia no vio."""
+    # Cacheado 10 min (2026-09-24): antes escaneaba TODOS los snapshots
+    # (distinct de buyer_name, ~100k filas) + el JSON de 3000 raw_allocations
+    # en cada request -- ~24s de los ~30s que tardaba /api/dashboard-metrics,
+    # y el front corta a los 15s, asi que cambiar el rango de dias "no hacia
+    # nada" (se quedaba con los datos viejos). Las opciones cambian muy poco.
+    cached = cache.get(_FILTER_OPTIONS_CACHE_KEY)
+    if cached:
+        return cached
+
+    # order_by() vacio antes de distinct() es obligatorio aca -- LiveSurveySnapshot
+    # tiene Meta.ordering = ["-polled_at"] por defecto, y Django arrastra esa
+    # columna al ORDER BY incluso con .values_list(...).distinct(), lo que
+    # rompe el DISTINCT (SQL exige que las columnas del ORDER BY esten en el
+    # SELECT para que agrupe bien) -- devolvia 54000+ filas con duplicados.
+    # Historico desde el rollup (chico, ya normalizado); lo nuevo que el rollup
+    # todavia no vio, de los snapshots de los ultimos 2 dias (indice polled_at).
+    recent_since = timezone.now() - timedelta(days=2)
+    buyers = set(
+        DailyMetricRollup.objects.exclude(buyer_name__in=["", "—"])
+        .order_by().values_list("buyer_name", flat=True).distinct()
+    ) | set(
+        LiveSurveySnapshot.objects.filter(polled_at__gte=recent_since).exclude(buyer_name="")
+        .order_by().values_list("buyer_name", flat=True).distinct()
+    )
+    buyers = sorted(b for b in buyers if b.lower() != TEST_BUYER.lower())
+    suppliers = set(
+        DailyMetricRollup.objects.exclude(supplier_name__in=["", "—", PENDING_SUPPLIER_LABEL])
+        .order_by().values_list("supplier_name", flat=True).distinct()
+    )
+    recent = (
+        LiveSurveySnapshot.objects.filter(polled_at__gte=recent_since).exclude(raw_allocations=[])
+        .order_by("-polled_at").only("raw_allocations")[:400]
+    )
+    for snap in recent:
+        for alloc in (snap.raw_allocations or []):
+            name = alloc.get("client_supplier__name")
+            if name:
+                suppliers.add(name)
+    result = (buyers, sorted(suppliers))
+    cache.set(_FILTER_OPTIONS_CACHE_KEY, result, 600)
+    return result
 
 
 def _fmt_day(iso: str) -> str:
@@ -601,7 +836,7 @@ def _first_supplier(snap) -> str:
         n = alloc.get("client_supplier__name")
         if n:
             return n
-    return "—"
+    return PENDING_SUPPLIER_LABEL
 
 
 # ---------------------------------------------------------------------------

@@ -22,8 +22,10 @@ from django.utils import timezone
 from audit.models import DecisionLog
 from intake.link_client import (
     LinkInternalApiError,
+    extract_survey_partner_id,
     get_allocations_for_survey,
     get_awarded_survey_suppliers,
+    get_survey_partner_detail,
     get_survey_supplier_detail,
 )
 from intake.models import AwardedSurvey
@@ -167,6 +169,16 @@ class Command(BaseCommand):
             # exclusion ya viene deshabilitado por defecto de todas formas).
             allocations = []
 
+        survey_partner = {}
+        partner_id = extract_survey_partner_id(detail)
+        if partner_id:
+            try:
+                survey_partner = get_survey_partner_detail(partner_id, settings.LINK_JWT_TOKEN)
+            except LinkInternalApiError:
+                # Mismo criterio que allocations: JWT vacio/vencido no es
+                # fatal, se evalua sin el desglose de quotas.
+                survey_partner = {}
+
         buyer_name = (detail.get("project") or {}).get("client", {}).get("name", "")
         type_industry_name = (detail.get("type_industry") or {}).get("name", "")
         active_suppliers = [
@@ -207,6 +219,7 @@ class Command(BaseCommand):
                     "noc": detail.get("noc"),
                     "raw_survey_supplier": detail,
                     "raw_allocations": allocations,
+                    "raw_survey_partner": survey_partner,
                 },
             )
 
