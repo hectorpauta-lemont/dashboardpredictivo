@@ -112,8 +112,8 @@ La ruta `/dashboard/` actual no exige inicio de sesión y entrega al navegador l
 Requisitos: Git y Python compatible con `requirements.txt`. La instalación local revisada usa Python 3.12.10; las dependencias están fijadas en [requirements.txt](requirements.txt).
 
 ```powershell
-git clone https://github.com/hectorpauta-lemont/dashboardvivo.git
-Set-Location dashboardvivo
+git clone https://github.com/hectorpauta-lemont/dashboardpredictivo.git
+Set-Location dashboardpredictivo
 py -3.12 -m venv venv
 .\venv\Scripts\python.exe -m pip install -r requirements.txt
 Copy-Item .env.example .env
@@ -312,7 +312,7 @@ Los scripts Linux pueden habilitar la API y Nginx al arrancar el servidor. Eso e
 
 ## 8. Preparar y subir a GitHub
 
-Repositorio: <https://github.com/hectorpauta-lemont/dashboardvivo>.
+Repositorio: <https://github.com/hectorpauta-lemont/dashboardpredictivo>.
 Cuenta prevista: `hectorpauta-lemont`, asociada a `mscdanielpauta@gmail.com`. El correo del autor de Git no selecciona la cuenta de autenticación.
 
 ### Paso 1: verificar cuenta, destino y rama
